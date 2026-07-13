@@ -1,0 +1,12 @@
+# Local secrets for `wrangler dev`. Copy to `.dev.vars` and fill in real values.
+# `.dev.vars` is gitignored — never commit real credentials.
+
+# BigCommerce store hash (e.g. abc123) — Advanced Settings > API Accounts
+BC_STORE_HASH="your_store_hash_here"
+
+# BigCommerce API access token (sent as X-Auth-Token)
+BC_ACCESS_TOKEN="your_access_token_here"
+
+# Bearer token clients must send as `Authorization: Bearer <token>` to reach /mcp.
+# Generate a long random string, e.g. `openssl rand -hex 32`.
+MCP_AUTH_TOKEN="generate_a_long_random_string"

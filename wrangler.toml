@@ -1,0 +1,18 @@
+name = "islandslipper-bc-mcp"
+main = "src/index.js"
+compatibility_date = "2026-07-12"
+
+# ---------------------------------------------------------------------------
+# SECRETS (required) — set these with `wrangler secret put <NAME>`.
+# NEVER commit real values to this file or the repo.
+#
+#   wrangler secret put BC_STORE_HASH      # BigCommerce store hash (e.g. abc123)
+#   wrangler secret put BC_ACCESS_TOKEN    # BigCommerce API access token (X-Auth-Token)
+#   wrangler secret put MCP_AUTH_TOKEN     # Bearer token clients must send to reach /mcp
+#
+# For local development with `wrangler dev`, put the same three keys in a
+# .dev.vars file (gitignored). See .dev.vars.example for the template.
+# ---------------------------------------------------------------------------
+
+[observability]
+enabled = true

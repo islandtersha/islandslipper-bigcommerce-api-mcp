@@ -1,34 +1,31 @@
 {
-  "name": "bigcommerce-api-mcp",
-  "version": "1.0.0",
-  "description": "BigCommerce API MCP server with tools for products, customers, and orders",
-  "main": "index.js",
+  "name": "islandslipper-bc-mcp",
+  "version": "2.0.0",
+  "description": "BigCommerce MCP server (Island Slipper fork) on Cloudflare Workers via Streamable HTTP transport",
   "type": "module",
+  "main": "src/index.js",
   "scripts": {
-    "list-tools": "node index.js tools",
-    "start": "node mcpServer.js",
-    "start:http": "node mcpServer.js --streamable-http",
-    "start:sse": "node mcpServer.js --sse",
-    "test:agno": "node test-agno-compatibility.js"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.0",
-    "commander": "^13.1.0",
-    "dotenv": "^16.4.7",
-    "express": "^5.1.0"
+    "@modelcontextprotocol/sdk": "^1.17.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.20.0"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18.0.0"
   },
   "keywords": [
     "bigcommerce",
     "mcp",
+    "cloudflare-workers",
+    "streamable-http",
     "api",
-    "ecommerce",
-    "orders",
-    "products",
-    "customers"
+    "ecommerce"
   ],
-  "author": "Developer",
+  "author": "Island Slipper (fork of isaacgounton/bigcommerce-api-mcp)",
   "license": "MIT"
 }
