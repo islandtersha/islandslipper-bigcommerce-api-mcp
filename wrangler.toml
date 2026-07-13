@@ -8,11 +8,26 @@ compatibility_date = "2026-07-12"
 #
 #   wrangler secret put BC_STORE_HASH      # BigCommerce store hash (e.g. abc123)
 #   wrangler secret put BC_ACCESS_TOKEN    # BigCommerce API access token (X-Auth-Token)
-#   wrangler secret put MCP_AUTH_TOKEN     # Bearer token clients must send to reach /mcp
+#   wrangler secret put MCP_AUTH_TOKEN     # Master key: pasted at /authorize to approve
+#                                          # new OAuth clients (Claude custom connector).
 #
 # For local development with `wrangler dev`, put the same three keys in a
 # .dev.vars file (gitignored). See .dev.vars.example for the template.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# OAuth 2.0 state storage (required).
+# @cloudflare/workers-oauth-provider stores client registrations and tokens in
+# a Workers KV namespace that MUST be bound as OAUTH_KV.
+#
+# Create the namespaces, then paste the returned IDs below:
+#   wrangler kv namespace create OAUTH_KV             -> copy "id" into `id`
+#   wrangler kv namespace create OAUTH_KV --preview   -> copy "preview_id" into `preview_id`
+# ---------------------------------------------------------------------------
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "50db44a3ff394b0b97f9b57051a76adb"
+preview_id = "fe97b62951cf4ffea7a2fcfda256c2a3"
 
 [observability]
 enabled = true
