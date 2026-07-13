@@ -6,14 +6,57 @@
 const SKU_CHUNK_SIZE = 50;
 
 /**
- * Fetch products (with variants) for a set of SKUs, transparently chunking the
- * `sku:in` filter. Returns the flat list of product objects.
+ * Fetch products (with variants) for a set of SKUs. Returns the flat list of
+ * product objects.
+ *
+ * IMPORTANT: `sku:in` on `GET /v3/catalog/products` matches only the
+ * product-level (base) SKU — it never matches variant SKUs (e.g.
+ * "PT202-NAVY-8"). Variant SKUs must be resolved via the dedicated
+ * `GET /v3/catalog/variants` endpoint. We therefore resolve the requested
+ * SKUs to product IDs from BOTH endpoints (variants for variant SKUs, products
+ * for base/simple-product SKUs), then fetch the full products by ID so callers
+ * still get product-level fields (name, is_visible) and complete variant data.
  */
 export async function fetchProductsBySkus(bc, skus, storeHash) {
-  const products = [];
+  const productIds = new Set();
+
   for (const group of chunk(skus.map(String), SKU_CHUNK_SIZE)) {
+    const csv = group.join(",");
+
+    // Variant SKUs -> product IDs via the variants endpoint.
+    const variantData = await bc.get(
+      `/v3/catalog/variants?${new URLSearchParams({ "sku:in": csv, limit: "250" })}`,
+      { storeHash }
+    );
+    for (const v of variantData.data || []) {
+      if (v.product_id != null) productIds.add(v.product_id);
+    }
+
+    // Base SKUs of simple products (no variant options) don't appear in the
+    // variants endpoint, so also resolve via the products endpoint.
+    const productData = await bc.get(
+      `/v3/catalog/products?${new URLSearchParams({ "sku:in": csv, limit: "250" })}`,
+      { storeHash }
+    );
+    for (const p of productData.data || []) {
+      if (p.id != null) productIds.add(p.id);
+    }
+  }
+
+  if (productIds.size === 0) return [];
+
+  return fetchProductsByIds(bc, [...productIds], storeHash);
+}
+
+/**
+ * Fetch full products (with variants) for a list of product IDs, chunking the
+ * `id:in` filter. Returns the flat list of product objects.
+ */
+async function fetchProductsByIds(bc, ids, storeHash) {
+  const products = [];
+  for (const group of chunk(ids.map(String), SKU_CHUNK_SIZE)) {
     const q = new URLSearchParams({
-      "sku:in": group.join(","),
+      "id:in": group.join(","),
       include: "variants",
       limit: "250",
     });
@@ -25,13 +68,7 @@ export async function fetchProductsBySkus(bc, skus, storeHash) {
 
 /** Fetch products (with variants) by product_id. Returns product objects. */
 export async function fetchProductsById(bc, productId, storeHash) {
-  const q = new URLSearchParams({
-    "id:in": String(productId),
-    include: "variants",
-    limit: "250",
-  });
-  const data = await bc.get(`/v3/catalog/products?${q}`, { storeHash });
-  return data.data || [];
+  return fetchProductsByIds(bc, [productId], storeHash);
 }
 
 /**
