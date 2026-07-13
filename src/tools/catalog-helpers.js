@@ -105,6 +105,36 @@ function variantRow(product, variant) {
   };
 }
 
+/**
+ * Resolve the store's single inventory location id, required by the absolute
+ * inventory adjustments API (PUT /v3/inventory/adjustments/absolute).
+ *
+ * Island Slipper is a single-location store (Pearl City factory + web
+ * fulfillment), so this fetches GET /v3/inventory/locations and returns that
+ * one location's id. It deliberately does NOT hardcode `location_id: 1`:
+ * instead it verifies on every call and throws if the store has zero or more
+ * than one location, so a misconfigured / multi-location store surfaces loudly
+ * rather than silently writing inventory to the wrong warehouse.
+ */
+export async function resolveInventoryLocationId(bc, storeHash) {
+  const data = await bc.get("/v3/inventory/locations", { storeHash });
+  const locations = data.data || [];
+  if (locations.length === 0) {
+    throw new Error(
+      "No BigCommerce inventory locations found; cannot apply inventory adjustments."
+    );
+  }
+  if (locations.length > 1) {
+    const list = locations
+      .map((l) => `${l.id} (${l.label || l.code || "unnamed"})`)
+      .join(", ");
+    throw new Error(
+      `Multiple inventory locations found (${list}); update_inventory needs a single target location — pick one before writing.`
+    );
+  }
+  return locations[0].id;
+}
+
 export function chunk(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) {
