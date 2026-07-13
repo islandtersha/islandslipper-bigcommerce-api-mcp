@@ -28,8 +28,13 @@ const executeFunction = async ({ start_date, end_date } = {}, { bc }) => {
       return { error: "start_date must be on or before end_date." };
     }
 
-    // 1. Pull every refund and keep those whose `created` is inside the window.
+    // 1. Pull every refund, then sort newest-first client-side. The BigCommerce
+    //    refunds endpoint does not support server-side sorting (returns HTTP 422
+    //    for a `sort` param), so we order the records here instead.
     const allRefunds = await fetchAllRefunds(bc);
+    allRefunds.sort((a, b) => (parseTimeMs(b.created) ?? 0) - (parseTimeMs(a.created) ?? 0));
+
+    // Keep only refunds whose `created` falls inside the window.
     const inWindow = allRefunds.filter((r) => {
       const ms = parseTimeMs(r.created);
       return ms !== null && ms >= startMs && ms <= endMs;
@@ -134,7 +139,6 @@ async function fetchAllRefunds(bc) {
     const q = new URLSearchParams({
       limit: String(limit),
       page: String(page),
-      sort: "created:desc",
     });
     const data = await bc.get(`/v3/orders/payment_actions/refunds?${q}`);
     const batch = Array.isArray(data) ? data : data.data || [];
