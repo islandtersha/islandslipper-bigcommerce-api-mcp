@@ -173,18 +173,30 @@ export async function resolveProduct(bc, identifier, storeHash) {
   // legacy product can carry 80+ variants, and the by-id endpoint returns the
   // full variant set in one predictable subrequest. fetchFullProductsByIds
   // stays for the genuine multi-id callers (e.g. the duplicate-SKU path above).
-  const data = await bc.get(
-    `/v3/catalog/products/${ids[0]}?include=variants,custom_fields`,
-    { storeHash }
-  );
-  const product = data.data;
-  if (!product) {
-    throw new Error(
+  const notFound = () =>
+    new Error(
       hasId
         ? `No product found with product_id ${product_id}.`
         : `No product found with SKU "${sku}".`
     );
+
+  let data;
+  try {
+    data = await bc.get(
+      `/v3/catalog/products/${ids[0]}?include=variants,custom_fields`,
+      { storeHash }
+    );
+  } catch (e) {
+    // The bc client sets `status` from the HTTP response (see bc-client.js);
+    // a 404 means the id doesn't exist. Re-throw the friendly, identifier-named
+    // message so operators see it rather than a bare BigCommerce 404. Any other
+    // error (auth, 5xx, network) propagates unchanged.
+    if (e && e.status === 404) throw notFound();
+    throw e;
   }
+
+  const product = data.data;
+  if (!product) throw notFound();
   return product;
 }
 
