@@ -19,7 +19,12 @@
 import { fetchAllPages } from "./catalog-helpers.js";
 
 const executeFunction = async (
-  { parent_id, include_hidden = true, store_Hash } = {},
+  {
+    parent_id,
+    include_hidden = true,
+    include_product_counts = false,
+    store_Hash,
+  } = {},
   { bc }
 ) => {
   try {
@@ -30,16 +35,20 @@ const executeFunction = async (
       store_Hash
     );
 
-    // 2. Tally product counts per category from a single full product sweep.
-    const products = await fetchAllPages(
-      bc,
-      "/v3/catalog/products?include_fields=categories",
-      store_Hash
-    );
-    const countById = new Map();
-    for (const p of products) {
-      for (const cid of p.categories || []) {
-        countById.set(cid, (countById.get(cid) || 0) + 1);
+    // 2. Tally product counts per category from a single full product sweep —
+    //    only when requested, since it can be an extra multi-page fetch.
+    let countById = null;
+    if (include_product_counts) {
+      const products = await fetchAllPages(
+        bc,
+        "/v3/catalog/products?include_fields=categories",
+        store_Hash
+      );
+      countById = new Map();
+      for (const p of products) {
+        for (const cid of p.categories || []) {
+          countById.set(cid, (countById.get(cid) || 0) + 1);
+        }
       }
     }
 
@@ -87,15 +96,19 @@ const executeFunction = async (
       visible = visible.filter((c) => c.is_visible);
     }
 
-    // 6. Shape and sort by path so the array reads as a tree.
-    const rows = visible.map((c) => ({
-      id: c.id,
-      name: c.name,
-      parent_id: c.parent_id,
-      path: pathFor(c.id),
-      is_visible: c.is_visible,
-      product_count: countById.get(c.id) || 0,
-    }));
+    // 6. Shape and sort by path so the array reads as a tree. product_count is
+    //    only present when the sweep ran; otherwise it is omitted entirely.
+    const rows = visible.map((c) => {
+      const row = {
+        id: c.id,
+        name: c.name,
+        parent_id: c.parent_id,
+        path: pathFor(c.id),
+        is_visible: c.is_visible,
+      };
+      if (countById) row.product_count = countById.get(c.id) || 0;
+      return row;
+    });
     rows.sort((a, b) => a.path.localeCompare(b.path));
     return rows;
   } catch (error) {
@@ -112,7 +125,7 @@ const apiTool = {
     function: {
       name: "get_categories",
       description:
-        "Read the full BigCommerce category tree (Catalog Categories API v3), paginated fully. Returns a flat array of { id, name, parent_id, path, is_visible, product_count } sorted by breadcrumb path so it reads top-down as a tree; `path` is the full breadcrumb like 'Women > Wedges'. product_count is the number of products directly assigned to the category (derived by tallying the product list; subcategory-only products are not rolled up). Read-only — no writes. Optional parent_id returns only that subtree (the node and its descendants); include_hidden (default true) keeps categories with is_visible=false.",
+        "Read the full BigCommerce category tree (Catalog Categories API v3), paginated fully. Returns a flat array of { id, name, parent_id, path, is_visible } sorted by breadcrumb path so it reads top-down as a tree; `path` is the full breadcrumb like 'Women > Wedges'. Read-only — no writes. Optional parent_id returns only that subtree (the node and its descendants); include_hidden (default true) keeps categories with is_visible=false. Set include_product_counts=true (default false) to also include product_count on each row — the number of products directly assigned to the category (subcategory-only products are not rolled up); this runs an extra full product-list sweep, so it is opt-in. When false, product_count is omitted from the rows entirely.",
       parameters: {
         type: "object",
         properties: {
@@ -125,6 +138,11 @@ const apiTool = {
             type: "boolean",
             description:
               "When true (default), include categories with is_visible=false. Set false to return only visible categories.",
+          },
+          include_product_counts: {
+            type: "boolean",
+            description:
+              "When true, run an extra full product-list sweep and add product_count (direct assignments) to each row. Defaults to false, in which case product_count is omitted from the output entirely (not returned as 0).",
           },
           store_Hash: {
             type: "string",
