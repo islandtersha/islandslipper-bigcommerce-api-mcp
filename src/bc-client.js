@@ -71,6 +71,10 @@ export class BcClient {
           `BigCommerce ${method} ${stripBase(url)} -> HTTP ${response.status}: ${truncate(text)}`
         );
         err.status = response.status;
+        // Raw, untruncated response body so tools can surface BigCommerce's
+        // exact error text (e.g. verbatim SKU-uniqueness messages) instead of
+        // parsing it back out of err.message.
+        err.body = text;
         throw err;
       }
 
