@@ -19,6 +19,11 @@ const SKU_CHUNK_SIZE = 50;
  */
 export async function fetchProductsBySkus(bc, skus, storeHash) {
   const productIds = new Set();
+  // Match the exact-equality behaviour of findProductIdsBySku: BigCommerce may
+  // return extra rows from `sku:in` (e.g. substring-ish matches), so only keep
+  // rows whose SKU EXACTLY equals one of the requested SKUs. Without this the
+  // two resolution paths could over-fetch and diverge.
+  const requested = new Set(skus.map(String));
 
   for (const group of chunk(skus.map(String), SKU_CHUNK_SIZE)) {
     const csv = group.join(",");
@@ -29,7 +34,9 @@ export async function fetchProductsBySkus(bc, skus, storeHash) {
       { storeHash }
     );
     for (const v of variantData.data || []) {
-      if (v.product_id != null) productIds.add(v.product_id);
+      if (requested.has(String(v.sku)) && v.product_id != null) {
+        productIds.add(v.product_id);
+      }
     }
 
     // Base SKUs of simple products (no variant options) don't appear in the
@@ -39,7 +46,9 @@ export async function fetchProductsBySkus(bc, skus, storeHash) {
       { storeHash }
     );
     for (const p of productData.data || []) {
-      if (p.id != null) productIds.add(p.id);
+      if (requested.has(String(p.sku)) && p.id != null) {
+        productIds.add(p.id);
+      }
     }
   }
 
@@ -76,8 +85,12 @@ export async function fetchProductsById(bc, productId, storeHash) {
  * product IDs. The catalog write/category tools need custom_fields (e.g. the
  * `~origin_categories` provenance field) and `categories`, which the leaner
  * fetchProductsByIds (variants only) omits.
+ *
+ * Exported for genuine multi-id callers — update_product's read-back
+ * verification and the upcoming assign_categories / set_visibility tools — plus
+ * the duplicate-SKU error path below, which is legitimately multi-id.
  */
-async function fetchFullProductsByIds(bc, ids, storeHash) {
+export async function fetchFullProductsByIds(bc, ids, storeHash) {
   const products = [];
   for (const group of chunk(ids.map(String), SKU_CHUNK_SIZE)) {
     const q = new URLSearchParams({
@@ -155,15 +168,24 @@ export async function resolveProduct(bc, identifier, storeHash) {
     }
   }
 
-  const products = await fetchFullProductsByIds(bc, ids, storeHash);
-  if (products.length === 0) {
+  // `ids` is now exactly one product id. Fetch it via the single-record
+  // endpoint rather than the `id:in=` list query: a style-with-color+size
+  // legacy product can carry 80+ variants, and the by-id endpoint returns the
+  // full variant set in one predictable subrequest. fetchFullProductsByIds
+  // stays for the genuine multi-id callers (e.g. the duplicate-SKU path above).
+  const data = await bc.get(
+    `/v3/catalog/products/${ids[0]}?include=variants,custom_fields`,
+    { storeHash }
+  );
+  const product = data.data;
+  if (!product) {
     throw new Error(
       hasId
         ? `No product found with product_id ${product_id}.`
         : `No product found with SKU "${sku}".`
     );
   }
-  return products[0];
+  return product;
 }
 
 /**
@@ -174,7 +196,16 @@ export async function resolveProduct(bc, identifier, storeHash) {
 export function indexVariantsBySku(products) {
   const map = new Map();
   for (const p of products) {
-    const variants = p.variants || [];
+    // A missing `variants` array means the caller fetched without
+    // include=variants; silently mapping nothing would hand the caller an empty
+    // result that looks like "SKU not found". Fail loudly instead.
+    if (!Array.isArray(p.variants)) {
+      throw new Error(
+        `Product #${p.id} was passed to indexVariantsBySku without a \`variants\` array; ` +
+          `fetch it with include=variants before indexing.`
+      );
+    }
+    const variants = p.variants;
     for (const v of variants) {
       if (v.sku) {
         map.set(String(v.sku), variantRow(p, v));
@@ -210,8 +241,20 @@ function variantRow(product, variant) {
  * instead it verifies on every call and throws if the store has zero or more
  * than one location, so a misconfigured / multi-location store surfaces loudly
  * rather than silently writing inventory to the wrong warehouse.
+ *
+ * Memoized per Worker invocation: the result is cached on the request-scoped
+ * `bc` client (keyed by storeHash, since bc.get accepts a storeHash override),
+ * so repeated adjustments in one update_inventory call cost a single
+ * `GET /v3/inventory/locations` subrequest instead of one per SKU. A fresh bc
+ * is built per tool call (see mcp.js), so the cache never outlives the request
+ * — preferred over a module-level (per-isolate) cache, which would persist
+ * across unrelated requests and could serve a stale single-location id after a
+ * store added a second location, silently bypassing the multi-location throw.
  */
 export async function resolveInventoryLocationId(bc, storeHash) {
+  const cache = (bc._inventoryLocationIdCache ||= new Map());
+  if (cache.has(storeHash)) return cache.get(storeHash);
+
   const data = await bc.get("/v3/inventory/locations", { storeHash });
   const locations = data.data || [];
   if (locations.length === 0) {
@@ -227,7 +270,9 @@ export async function resolveInventoryLocationId(bc, storeHash) {
       `Multiple inventory locations found (${list}); update_inventory needs a single target location — pick one before writing.`
     );
   }
-  return locations[0].id;
+  const id = locations[0].id;
+  cache.set(storeHash, id);
+  return id;
 }
 
 /**
@@ -321,14 +366,18 @@ export function chunk(arr, size) {
  * Worker aborts opaquely once the platform's per-request subrequest limit is
  * hit (50 on the Free plan, 1000 on paid). To fail loudly and early instead,
  * a single sweep throws a clear error if it would exceed `maxPages` (default
- * 40 — safely under the Free-plan ceiling). Raise `maxPages` on a paid plan,
- * or narrow the query, if a legitimate sweep needs more pages.
+ * 30 — deliberately below the Free-plan ceiling, leaving headroom for the
+ * NON-pagination subrequests a single tool call also spends: resolveProduct,
+ * the write itself, and read-back verification all share the same 50-subrequest
+ * budget, so the cap cannot claim the whole ceiling for pagination). Raise
+ * `maxPages` on a paid plan, or narrow the query, if a legitimate sweep needs
+ * more pages.
  */
 export async function fetchAllPages(
   bc,
   path,
   storeHash,
-  { limit = 250, maxPages = 40 } = {}
+  { limit = 250, maxPages = 30 } = {}
 ) {
   const results = [];
   let page = 1;
@@ -338,7 +387,9 @@ export async function fetchAllPages(
       throw new Error(
         `fetchAllPages exceeded its ${maxPages}-page subrequest cap while paginating "${path}" ` +
           `(fetched ${pagesFetched} pages, more remain). Each page is a Cloudflare Workers subrequest ` +
-          `(limit 50 on Free, 1000 on paid); raise maxPages or narrow the query.`
+          `(limit 50 on Free, 1000 on paid), and the cap stays below that ceiling on purpose to leave ` +
+          `room for the non-pagination subrequests in the same request (resolveProduct, the write, and ` +
+          `read-back verification); raise maxPages or narrow the query.`
       );
     }
 
