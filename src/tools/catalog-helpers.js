@@ -72,6 +72,101 @@ export async function fetchProductsById(bc, productId, storeHash) {
 }
 
 /**
+ * Fetch FULL product records — variants AND custom_fields — for a list of
+ * product IDs. The catalog write/category tools need custom_fields (e.g. the
+ * `~origin_categories` provenance field) and `categories`, which the leaner
+ * fetchProductsByIds (variants only) omits.
+ */
+async function fetchFullProductsByIds(bc, ids, storeHash) {
+  const products = [];
+  for (const group of chunk(ids.map(String), SKU_CHUNK_SIZE)) {
+    const q = new URLSearchParams({
+      "id:in": group.join(","),
+      include: "variants,custom_fields",
+      limit: "250",
+    });
+    const data = await bc.get(`/v3/catalog/products?${q}`, { storeHash });
+    products.push(...(data.data || []));
+  }
+  return products;
+}
+
+/**
+ * Find every product id whose base SKU OR one of its variant SKUs EXACTLY
+ * equals `sku`. Uses exact equality (not the substring behaviour of some BC
+ * endpoints) so resolution never grabs the wrong product. Returns an array of
+ * distinct product ids (usually 0 or 1; more than 1 signals a duplicate SKU).
+ */
+async function findProductIdsBySku(bc, sku, storeHash) {
+  const ids = new Set();
+  const params = new URLSearchParams({ "sku:in": sku, limit: "250" });
+
+  const variantData = await bc.get(`/v3/catalog/variants?${params}`, {
+    storeHash,
+  });
+  for (const v of variantData.data || []) {
+    if (String(v.sku) === sku && v.product_id != null) ids.add(v.product_id);
+  }
+
+  const productData = await bc.get(`/v3/catalog/products?${params}`, {
+    storeHash,
+  });
+  for (const p of productData.data || []) {
+    if (String(p.sku) === sku && p.id != null) ids.add(p.id);
+  }
+  return [...ids];
+}
+
+/**
+ * resolveProduct — shared entry point for the catalog write tools.
+ *
+ * Accepts an identifier of { product_id } OR { sku } and returns the FULL
+ * product record (variants, categories, custom_fields). Throws a clear Error
+ * when the identifier is malformed, nothing matches, or — for a SKU — MORE
+ * THAN ONE product matches: it lists every match rather than guessing which
+ * one the caller meant.
+ */
+export async function resolveProduct(bc, identifier, storeHash) {
+  const { product_id, sku } = identifier || {};
+  const hasId =
+    product_id !== undefined && product_id !== null && String(product_id) !== "";
+  const hasSku = sku !== undefined && sku !== null && String(sku).trim() !== "";
+
+  if (!hasId && !hasSku) {
+    throw new Error("identifier must include a `product_id` or a `sku`.");
+  }
+
+  let ids;
+  if (hasId) {
+    ids = [product_id];
+  } else {
+    ids = await findProductIdsBySku(bc, String(sku), storeHash);
+    if (ids.length === 0) {
+      throw new Error(`No product found with SKU "${sku}".`);
+    }
+    if (ids.length > 1) {
+      const matches = await fetchFullProductsByIds(bc, ids, storeHash);
+      const list = matches
+        .map((p) => `#${p.id} "${p.name}" (base SKU ${p.sku || "—"})`)
+        .join("; ");
+      throw new Error(
+        `SKU "${sku}" matches more than one product: ${list}. Disambiguate with product_id.`
+      );
+    }
+  }
+
+  const products = await fetchFullProductsByIds(bc, ids, storeHash);
+  if (products.length === 0) {
+    throw new Error(
+      hasId
+        ? `No product found with product_id ${product_id}.`
+        : `No product found with SKU "${sku}".`
+    );
+  }
+  return products[0];
+}
+
+/**
  * Build a Map of sku -> { product_id, variant_id, inventory_level, ... } from
  * a list of product objects, indexing every variant SKU and every product's
  * base SKU (falling back to the product's first variant).
