@@ -21,9 +21,12 @@ export async function fetchProductsBySkus(bc, skus, storeHash) {
   const productIds = new Set();
   // Match the exact-equality behaviour of findProductIdsBySku: BigCommerce may
   // return extra rows from `sku:in` (e.g. substring-ish matches), so only keep
-  // rows whose SKU EXACTLY equals one of the requested SKUs. Without this the
-  // two resolution paths could over-fetch and diverge.
-  const requested = new Set(skus.map(String));
+  // rows whose SKU equals one of the requested SKUs. Comparison is
+  // case-INSENSITIVE because BC's `sku:in` filter is — matching byte-for-byte
+  // here would reject a row BC deliberately returned for a differently-cased
+  // query (e.g. "pt202-whis-8" vs stored "PT202-WHIS-8"), a false negative.
+  // Only the comparison is normalized; returned product data keeps its casing.
+  const requested = new Set(skus.map((s) => String(s).toUpperCase()));
 
   for (const group of chunk(skus.map(String), SKU_CHUNK_SIZE)) {
     const csv = group.join(",");
@@ -34,7 +37,7 @@ export async function fetchProductsBySkus(bc, skus, storeHash) {
       { storeHash }
     );
     for (const v of variantData.data || []) {
-      if (requested.has(String(v.sku)) && v.product_id != null) {
+      if (requested.has(String(v.sku).toUpperCase()) && v.product_id != null) {
         productIds.add(v.product_id);
       }
     }
@@ -46,7 +49,7 @@ export async function fetchProductsBySkus(bc, skus, storeHash) {
       { storeHash }
     );
     for (const p of productData.data || []) {
-      if (requested.has(String(p.sku)) && p.id != null) {
+      if (requested.has(String(p.sku).toUpperCase()) && p.id != null) {
         productIds.add(p.id);
       }
     }
@@ -105,27 +108,32 @@ export async function fetchFullProductsByIds(bc, ids, storeHash) {
 }
 
 /**
- * Find every product id whose base SKU OR one of its variant SKUs EXACTLY
- * equals `sku`. Uses exact equality (not the substring behaviour of some BC
- * endpoints) so resolution never grabs the wrong product. Returns an array of
- * distinct product ids (usually 0 or 1; more than 1 signals a duplicate SKU).
+ * Find every product id whose base SKU OR one of its variant SKUs equals
+ * `sku`. Uses exact equality (not the substring behaviour of some BC
+ * endpoints) so resolution never grabs the wrong product — but case-
+ * INSENSITIVELY, matching BC's own `sku:in` filter, so a differently-cased
+ * lookup isn't rejected after BC returned the row. Returns an array of distinct
+ * product ids (usually 0 or 1; more than 1 signals a duplicate SKU).
  */
 async function findProductIdsBySku(bc, sku, storeHash) {
   const ids = new Set();
+  const target = String(sku).toUpperCase();
   const params = new URLSearchParams({ "sku:in": sku, limit: "250" });
 
   const variantData = await bc.get(`/v3/catalog/variants?${params}`, {
     storeHash,
   });
   for (const v of variantData.data || []) {
-    if (String(v.sku) === sku && v.product_id != null) ids.add(v.product_id);
+    if (String(v.sku).toUpperCase() === target && v.product_id != null) {
+      ids.add(v.product_id);
+    }
   }
 
   const productData = await bc.get(`/v3/catalog/products?${params}`, {
     storeHash,
   });
   for (const p of productData.data || []) {
-    if (String(p.sku) === sku && p.id != null) ids.add(p.id);
+    if (String(p.sku).toUpperCase() === target && p.id != null) ids.add(p.id);
   }
   return [...ids];
 }
@@ -183,7 +191,7 @@ export async function resolveProduct(bc, identifier, storeHash) {
   let data;
   try {
     data = await bc.get(
-      `/v3/catalog/products/${ids[0]}?include=variants,custom_fields`,
+      `/v3/catalog/products/${encodeURIComponent(ids[0])}?include=variants,custom_fields`,
       { storeHash }
     );
   } catch (e) {
