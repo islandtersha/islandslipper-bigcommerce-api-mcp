@@ -11,6 +11,7 @@ import { apiTool as getDailySales } from "./get-daily-sales.js";
 import { apiTool as getRefundsSummary } from "./get-refunds-summary.js";
 import { apiTool as getInventoryLevels } from "./get-inventory-levels.js";
 import { apiTool as updateInventory } from "./update-inventory.js";
+import { apiTool as getCategories } from "./get-categories.js";
 
 export const tools = [
   getAllProducts,
@@ -20,4 +21,5 @@ export const tools = [
   getRefundsSummary,
   getInventoryLevels,
   updateInventory,
+  getCategories,
 ];

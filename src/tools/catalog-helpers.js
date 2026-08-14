@@ -142,3 +142,32 @@ export function chunk(arr, size) {
   }
   return out;
 }
+
+/**
+ * Fetch EVERY page of a paginated BigCommerce v3 list endpoint, following
+ * `meta.pagination.total_pages`. Never stops at page 1. `path` may already
+ * carry a query string (e.g. filters / include_fields); `page` and `limit`
+ * are appended per request. Returns the concatenated `data` arrays.
+ *
+ * The BC client already backs off on 429s, so this loops without extra delay.
+ */
+export async function fetchAllPages(bc, path, storeHash, { limit = 250 } = {}) {
+  const results = [];
+  let page = 1;
+  for (;;) {
+    const sep = path.includes("?") ? "&" : "?";
+    const url = `${path}${sep}${new URLSearchParams({
+      page: String(page),
+      limit: String(limit),
+    })}`;
+    const data = await bc.get(url, { storeHash });
+    const batch = data.data || [];
+    results.push(...batch);
+
+    const pagination = data.meta && data.meta.pagination;
+    const totalPages = pagination ? pagination.total_pages : 1;
+    if (!pagination || page >= totalPages || batch.length === 0) break;
+    page++;
+  }
+  return results;
+}
