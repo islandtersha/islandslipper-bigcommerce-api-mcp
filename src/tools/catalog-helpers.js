@@ -230,6 +230,77 @@ export async function resolveInventoryLocationId(bc, storeHash) {
   return locations[0].id;
 }
 
+/**
+ * Compute EFFECTIVE visibility for every category in a tree.
+ *
+ * A category is effectively visible only if it AND every ancestor up to a root
+ * (parent_id 0) has is_visible truthy — i.e. a shopper can actually reach it.
+ * A node under a hidden ancestor is NOT effectively visible even if its own
+ * is_visible flag is true. Returns a Map of category id -> boolean.
+ *
+ * `byId` must be a Map of id -> category record for the FULL tree, so ancestor
+ * walks reach the true root regardless of any subtree filtering the caller
+ * applies afterwards. Results are memoized, so total work is linear in the
+ * number of categories rather than quadratic.
+ *
+ * Cycle / malformed-tree guard: each ancestor walk is capped at the category
+ * count. If a chain exceeds the cap (only possible with a cycle or a broken
+ * parent pointer), the node is treated as NOT visible and its id is logged,
+ * so a bad BC tree fails safe instead of hanging the Worker.
+ */
+export function computeEffectiveVisibility(byId) {
+  const effective = new Map();
+  const cap = byId.size + 1;
+
+  const resolve = (id) => {
+    if (effective.has(id)) return effective.get(id);
+
+    // Walk up the ancestor chain, collecting unresolved nodes until we hit a
+    // root, a missing parent, an already-resolved node, or the cycle cap.
+    const chain = [];
+    let cur = byId.get(id);
+    let steps = 0;
+    let base; // visibility to fold the collected chain onto
+
+    for (;;) {
+      if (!cur) {
+        base = true; // missing parent → treat the chain top as a root
+        break;
+      }
+      if (effective.has(cur.id)) {
+        base = effective.get(cur.id);
+        break;
+      }
+      if (steps++ > cap) {
+        console.log(
+          `computeEffectiveVisibility: parent chain cap (${cap}) exceeded at category ${cur.id}; treating as not visible (possible cycle).`
+        );
+        base = false;
+        break;
+      }
+      chain.push(cur);
+      if (!cur.parent_id) {
+        base = true; // reached a root (parent_id 0)
+        break;
+      }
+      cur = byId.get(cur.parent_id);
+    }
+
+    // Fold from the topmost collected node down: each node is effectively
+    // visible iff its own flag is truthy AND everything above it is too.
+    let acc = base;
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const node = chain[i];
+      acc = acc && Boolean(node.is_visible);
+      effective.set(node.id, acc);
+    }
+    return effective.get(id);
+  };
+
+  for (const id of byId.keys()) resolve(id);
+  return effective;
+}
+
 export function chunk(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) {

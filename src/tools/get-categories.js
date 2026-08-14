@@ -16,7 +16,10 @@
  * BigCommerce stores product↔category membership.
  */
 
-import { fetchAllPages } from "./catalog-helpers.js";
+import {
+  fetchAllPages,
+  computeEffectiveVisibility,
+} from "./catalog-helpers.js";
 
 const executeFunction = async (
   {
@@ -71,8 +74,10 @@ const executeFunction = async (
     };
 
     // 4. Optional subtree filter: keep parent_id and all of its descendants.
+    //    parent_id 0 (the synthetic root every top-level category points at)
+    //    means "the whole tree" — identical to omitting the parameter.
     let visible = categories;
-    if (parent_id !== undefined && parent_id !== null) {
+    if (parent_id !== undefined && parent_id !== null && parent_id !== 0) {
       if (!byId.has(parent_id)) {
         return {
           error: `parent_id ${parent_id} not found among ${categories.length} categories.`,
@@ -91,9 +96,15 @@ const executeFunction = async (
       visible = categories.filter((c) => inSubtree(c.id));
     }
 
-    // 5. Optionally drop hidden categories from the output.
+    // 5. When include_hidden is false, drop categories that aren't EFFECTIVELY
+    //    visible — hidden themselves OR sitting under any hidden ancestor.
+    //    Computed from the FULL tree (byId) so ancestor walks reach the true
+    //    root even when a parent_id subtree filter has narrowed `visible`.
+    //    This prunes whole subtrees, so the result always reassembles into a
+    //    tree with no dangling parent references.
     if (!include_hidden) {
-      visible = visible.filter((c) => c.is_visible);
+      const effective = computeEffectiveVisibility(byId);
+      visible = visible.filter((c) => effective.get(c.id));
     }
 
     // 6. Shape and sort by path so the array reads as a tree. product_count is
@@ -125,19 +136,19 @@ const apiTool = {
     function: {
       name: "get_categories",
       description:
-        "Read the full BigCommerce category tree (Catalog Categories API v3), paginated fully. Returns a flat array of { id, name, parent_id, path, is_visible } sorted by breadcrumb path so it reads top-down as a tree; `path` is the full breadcrumb like 'Women > Wedges'. Read-only — no writes. Optional parent_id returns only that subtree (the node and its descendants); include_hidden (default true) keeps categories with is_visible=false. Set include_product_counts=true (default false) to also include product_count on each row — the number of products directly assigned to the category (subcategory-only products are not rolled up); this runs an extra full product-list sweep, so it is opt-in. When false, product_count is omitted from the rows entirely.",
+        "Read the full BigCommerce category tree (Catalog Categories API v3), paginated fully. Returns a flat array of { id, name, parent_id, path, is_visible } sorted by breadcrumb path so it reads top-down as a tree; `path` is the full breadcrumb like 'Women > Wedges'. Read-only — no writes. Optional parent_id returns only that subtree (the node and its descendants); parent_id 0 means the whole tree (identical to omitting it). include_hidden defaults to true and returns EVERY category with its own raw is_visible flag. Set include_hidden=false to prune by reachability: a category is excluded when it OR any ancestor is hidden, so whole hidden subtrees drop out and the result always reassembles into a tree with no dangling parent references. Note: the is_visible field in the output is always the node's OWN raw flag and does not account for ancestors — callers using the default should walk ancestors themselves if they need effective reachability. Set include_product_counts=true (default false) to also include product_count on each row — the number of products directly assigned to the category (subcategory-only products are not rolled up); this runs an extra full product-list sweep, so it is opt-in. When false, product_count is omitted from the rows entirely.",
       parameters: {
         type: "object",
         properties: {
           parent_id: {
             type: "integer",
             description:
-              "Optional. If provided, return only the subtree rooted at this category id (the node itself plus all descendants).",
+              "Optional. If provided, return only the subtree rooted at this category id (the node itself plus all descendants). Pass 0 (or omit) for the whole tree.",
           },
           include_hidden: {
             type: "boolean",
             description:
-              "When true (default), include categories with is_visible=false. Set false to return only visible categories.",
+              "When true (default), return every category with its own raw is_visible flag. When false, prune by reachability — exclude any category that is hidden itself OR sits under a hidden ancestor — so whole hidden subtrees drop out and the result stays a valid tree. The output is_visible field is always the node's own raw flag, never the computed effective value.",
           },
           include_product_counts: {
             type: "boolean",
