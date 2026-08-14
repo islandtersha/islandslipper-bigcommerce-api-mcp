@@ -150,17 +150,39 @@ export function chunk(arr, size) {
  * are appended per request. Returns the concatenated `data` arrays.
  *
  * The BC client already backs off on 429s, so this loops without extra delay.
+ *
+ * Subrequest guard: each page is one Cloudflare Workers subrequest, and the
+ * Worker aborts opaquely once the platform's per-request subrequest limit is
+ * hit (50 on the Free plan, 1000 on paid). To fail loudly and early instead,
+ * a single sweep throws a clear error if it would exceed `maxPages` (default
+ * 40 — safely under the Free-plan ceiling). Raise `maxPages` on a paid plan,
+ * or narrow the query, if a legitimate sweep needs more pages.
  */
-export async function fetchAllPages(bc, path, storeHash, { limit = 250 } = {}) {
+export async function fetchAllPages(
+  bc,
+  path,
+  storeHash,
+  { limit = 250, maxPages = 40 } = {}
+) {
   const results = [];
   let page = 1;
+  let pagesFetched = 0;
   for (;;) {
+    if (pagesFetched >= maxPages) {
+      throw new Error(
+        `fetchAllPages exceeded its ${maxPages}-page subrequest cap while paginating "${path}" ` +
+          `(fetched ${pagesFetched} pages, more remain). Each page is a Cloudflare Workers subrequest ` +
+          `(limit 50 on Free, 1000 on paid); raise maxPages or narrow the query.`
+      );
+    }
+
     const sep = path.includes("?") ? "&" : "?";
     const url = `${path}${sep}${new URLSearchParams({
       page: String(page),
       limit: String(limit),
     })}`;
     const data = await bc.get(url, { storeHash });
+    pagesFetched++;
     const batch = data.data || [];
     results.push(...batch);
 
