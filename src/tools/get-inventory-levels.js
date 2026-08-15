@@ -3,7 +3,10 @@
  * via the BigCommerce Catalog Products API v3, including variants.
  */
 
-import { fetchProductsBySkus, fetchProductsById } from "./catalog-helpers.js";
+import {
+  fetchProductsBySkus,
+  fetchProductsWithVariantsById,
+} from "./catalog-helpers.js";
 
 const executeFunction = async ({ skus, product_id, store_Hash } = {}, { bc }) => {
   try {
@@ -19,7 +22,7 @@ const executeFunction = async ({ skus, product_id, store_Hash } = {}, { bc }) =>
     if (hasSkus) {
       products = await fetchProductsBySkus(bc, skus, store_Hash);
     } else {
-      products = await fetchProductsById(bc, product_id, store_Hash);
+      products = await fetchProductsWithVariantsById(bc, product_id, store_Hash);
     }
 
     const rows = flattenRows(products);
