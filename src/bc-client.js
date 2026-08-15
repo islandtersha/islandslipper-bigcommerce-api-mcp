@@ -144,7 +144,9 @@ export class BcClient {
  * retries already performed in this request() call: 0 means the cap was hit
  * pre-flight (the tool is over-fetching — narrow the query), > 0 means it was
  * hit while retrying a rate-limited request (the store is being throttled —
- * back off, don't narrow). Distinct wording so those get opposite responses.
+ * back off). The retry case can ALSO be an over-fetch (a tool that spent most
+ * of the budget before catching one 429 has both problems), so its message
+ * carries the subrequest count and says to narrow too when that count is high.
  */
 function subrequestBudgetError(toolName, count, attempt) {
   const who = toolName || "unknown";
@@ -152,9 +154,11 @@ function subrequestBudgetError(toolName, count, attempt) {
     attempt > 0
       ? `Subrequest budget exhausted while RETRYING a rate-limited (429) request: tool "${who}" ` +
         `reached the soft cap of ${SUBREQUEST_SOFT_CAP} BigCommerce subrequests (Cloudflare Workers ` +
-        `Free plan aborts at 50) on retry attempt ${attempt}, after ${count} subrequests. BigCommerce ` +
-        `is throttling this store and each 429 retry is itself a counted subrequest — back off and ` +
-        `retry later rather than narrowing the query. A paid Workers plan raises the ceiling to 1000.`
+        `Free plan aborts at 50) on retry attempt ${attempt}, after ${count} subrequests. Each 429 ` +
+        `retry is itself a counted subrequest, so back off and retry later. AND — because ${count} of ` +
+        `${SUBREQUEST_SOFT_CAP} subrequests were already spent before this 429 — if that count is high ` +
+        `the call is also over-fetching and should be narrowed, not just retried (a low count means it ` +
+        `is mostly throttling). A paid Workers plan raises the ceiling to 1000.`
       : `Subrequest budget exhausted: tool "${who}" reached the soft cap of ${SUBREQUEST_SOFT_CAP} ` +
         `BigCommerce subrequests in a single request (Cloudflare Workers Free plan aborts at 50; ` +
         `${count} subrequests, attempt ${attempt}). The budget is shared across the whole tool call — ` +
