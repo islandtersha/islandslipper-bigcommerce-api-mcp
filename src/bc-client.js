@@ -8,6 +8,17 @@
 const BASE_URL = "https://api.bigcommerce.com/stores";
 
 /**
+ * Cloudflare Workers cap outbound subrequests per incoming request: 50 on the
+ * Free plan, 1000 on paid. This budget is shared across the WHOLE tool call —
+ * pagination, resolveProduct, the write, and read-back verification all draw
+ * from the same pool. We throw our own clear error at a soft cap safely below
+ * 50 so it wins the race against Cloudflare's opaque abort at the ceiling, and
+ * so a few subrequests remain for 429 retry fetches (which are real
+ * subrequests this per-call counter doesn't split out).
+ */
+export const SUBREQUEST_SOFT_CAP = 45;
+
+/**
  * Build a BigCommerce client from the Worker env bindings.
  * @param {Record<string, string>} env
  * @returns {BcClient}
@@ -27,6 +38,12 @@ export class BcClient {
   constructor(storeHash, token) {
     this.storeHash = storeHash;
     this.token = token;
+    // Per-request (per-isolate-invocation) subrequest budget. This client is
+    // built fresh for every tool call (see mcp.js), so the count is naturally
+    // scoped to one incoming request. `toolName` is stamped by the dispatcher
+    // so the budget error can name the offending tool.
+    this.subrequestCount = 0;
+    this.toolName = null;
   }
 
   #headers() {
@@ -49,6 +66,22 @@ export class BcClient {
    * hint and retries (up to `maxRetries`).
    */
   async request(method, path, { body, storeHash, maxRetries = 4 } = {}) {
+    // Shared per-request subrequest budget (see SUBREQUEST_SOFT_CAP). Guard
+    // BEFORE issuing the subrequest so we throw a returnable error instead of
+    // letting the Worker hit the hard ceiling and abort opaquely. Counted once
+    // per bc.get/bc.put; 429 retry fetches below are extra real subrequests the
+    // soft cap's headroom absorbs.
+    if (this.subrequestCount >= SUBREQUEST_SOFT_CAP) {
+      throw new Error(
+        `Subrequest budget exhausted: tool "${this.toolName || "unknown"}" reached the soft cap ` +
+          `of ${SUBREQUEST_SOFT_CAP} BigCommerce subrequests in a single request (Cloudflare Workers ` +
+          `Free plan aborts at 50). The budget is shared across the whole tool call — pagination, ` +
+          `lookups, the write, and read-back verification all draw from it — so narrow the query or ` +
+          `split the work across calls. A paid Workers plan raises the ceiling to 1000.`
+      );
+    }
+    this.subrequestCount++;
+
     const url = this.#url(path, storeHash);
     let attempt = 0;
 

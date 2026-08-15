@@ -83,6 +83,7 @@ async function callTool(id, params, env) {
   let bc;
   try {
     bc = createBcClient(env);
+    bc.toolName = toolName; // so the shared subrequest-budget error can name it
   } catch (e) {
     return toolErrorResult(id, e.message);
   }
