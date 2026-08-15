@@ -223,6 +223,13 @@ export async function resolveProduct(bc, identifier, storeHash) {
  * Build a Map of sku -> { product_id, variant_id, inventory_level, ... } from
  * a list of product objects, indexing every variant SKU and every product's
  * base SKU (falling back to the product's first variant).
+ *
+ * The map is KEYED BY UPPERCASED SKU because BigCommerce's `sku:in` resolves
+ * case-insensitively — a lookup for "pt202-whis-8" must find a product BC
+ * stored as "PT202-WHIS-8". Callers MUST uppercase their lookup key
+ * (`map.get(String(sku).toUpperCase())`). The row VALUES keep the original
+ * stored casing in `.sku`, so results and downstream writes use the canonical
+ * SKU, not the uppercased key.
  */
 export function indexVariantsBySku(products) {
   const map = new Map();
@@ -239,12 +246,12 @@ export function indexVariantsBySku(products) {
     const variants = p.variants;
     for (const v of variants) {
       if (v.sku) {
-        map.set(String(v.sku), variantRow(p, v));
+        map.set(String(v.sku).toUpperCase(), variantRow(p, v));
       }
     }
     // Map the product's base SKU to its default variant if not already mapped.
-    if (p.sku && !map.has(String(p.sku)) && variants.length > 0) {
-      map.set(String(p.sku), variantRow(p, variants[0]));
+    if (p.sku && !map.has(String(p.sku).toUpperCase()) && variants.length > 0) {
+      map.set(String(p.sku).toUpperCase(), variantRow(p, variants[0]));
     }
   }
   return map;
