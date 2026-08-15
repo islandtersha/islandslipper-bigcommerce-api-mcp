@@ -312,6 +312,11 @@ export async function resolveInventoryLocationId(bc, storeHash) {
  * count. If a chain exceeds the cap (only possible with a cycle or a broken
  * parent pointer), the node is treated as NOT visible and its id is logged,
  * so a bad BC tree fails safe instead of hanging the Worker.
+ *
+ * Broken parent pointer: because `byId` is the FULL tree, a node whose
+ * parent_id is absent from it means the tree is broken — not that the node is a
+ * root. Such a node fails CLOSED (NOT visible) and is logged, matching the
+ * cycle-cap direction; every failure mode here fails the same way.
  */
 export function computeEffectiveVisibility(byId) {
   const effective = new Map();
@@ -329,7 +334,18 @@ export function computeEffectiveVisibility(byId) {
 
     for (;;) {
       if (!cur) {
-        base = true; // missing parent → treat the chain top as a root
+        // A node names a parent_id that isn't in the FULL tree — broken BC
+        // data. Fail CLOSED (not visible), same direction as the cycle cap,
+        // rather than treating the dangling node as a reachable root.
+        const child = chain[chain.length - 1];
+        console.log(
+          `computeEffectiveVisibility: category ${
+            child ? child.id : id
+          } references missing parent_id ${
+            child ? child.parent_id : "(unknown)"
+          }; treating as not visible (broken tree).`
+        );
+        base = false;
         break;
       }
       if (effective.has(cur.id)) {
