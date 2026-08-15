@@ -203,6 +203,13 @@ const executeFunction = async (
       visibilityAfter: updates.is_visible,
     });
 
+    // next_steps WITHOUT the pinned-customized assertion. That line claims the
+    // pin took effect, which is only true on the confirmed-success path — every
+    // failure branch (the PUT failing outright, and each verification failure)
+    // must use this filtered list. Hoisted above the PUT so the write-failure
+    // catch can use it too.
+    const nextStepsNoPin = next_steps.filter((s) => s !== PINNED_CUSTOMIZED_STEP);
+
     // Echo the caller's identifier verbatim. `sku` is the product's BASE sku,
     // which differs from a variant sku the caller may have passed (e.g.
     // "PT202-WHIS-8" resolves to base "PT202") — identifier_used keeps a
@@ -239,11 +246,15 @@ const executeFunction = async (
     } catch (err) {
       // A marked error (e.code) propagates to the dispatcher's budget handling.
       if (err && err.code) throw err;
+      // The write failed entirely — nothing landed. Say so explicitly
+      // (write_applied: false, distinct from the verification branches' true),
+      // and strip the pinned-customized assertion: no pin happened.
       return {
         ...base,
         status: "error",
+        write_applied: false,
         error_message: err.body || err.message,
-        next_steps,
+        next_steps: nextStepsNoPin,
       };
     }
 
@@ -255,9 +266,13 @@ const executeFunction = async (
     if (expectedUrl) {
       let cu = readCustomUrlObj(putResp);
       let verifyBudgetHit = false;
-      if (!cu || cu.url === undefined) {
-        // PUT response didn't echo custom_url — do ONE follow-up GET rather
-        // than assume. custom_url is a default product field (no include).
+      if (!cu || cu.url === undefined || cu.is_customized === undefined) {
+        // PUT response didn't echo the full custom_url — do ONE follow-up GET
+        // rather than assume. PUT responses are often leaner than GETs, so a
+        // response with the url but NO is_customized must still trigger the GET
+        // (otherwise we'd flag a successful pin as unverifiable). custom_url is
+        // a default product field (no include). If the GET is still missing the
+        // flag, the unverifiable-flag branch below handles it.
         // NOTE: this GET is the only subrequest in verification, and the PUT has
         // already succeeded by now. If it throws the shared subrequest-budget
         // error we deliberately swallow it here rather than let it escape to the
@@ -279,12 +294,9 @@ const executeFunction = async (
         actualUrl != null ? normalizeSlug(actualUrl) : undefined;
       const actualIsCustomized = cu ? cu.is_customized : undefined;
 
-      // The pinned-customized assertion is only true on the confirmed-success
-      // path — strip it from every error branch. On could-not-verify, replace
-      // it with the "pin requested but unconfirmed" note.
-      const nextStepsNoPin = next_steps.filter(
-        (s) => s !== PINNED_CUSTOMIZED_STEP
-      );
+      // On could-not-verify, replace the (stripped) pinned assertion with the
+      // "pin requested but unconfirmed" note. nextStepsNoPin is hoisted above
+      // the PUT so the write-failure branch shares it.
       const pinRequestedNote = pinnedCustomizedFlip ? [PIN_UNCONFIRMED_STEP] : [];
 
       if (normalizedActual === undefined) {
