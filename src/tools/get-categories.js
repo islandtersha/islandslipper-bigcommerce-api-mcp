@@ -123,6 +123,7 @@ const executeFunction = async (
     rows.sort((a, b) => a.path.localeCompare(b.path));
     return rows;
   } catch (error) {
+    if (error && error.code) throw error; // marked errors (e.g. budget) propagate
     return {
       error: `An error occurred while getting categories: ${error.message}`,
     };
