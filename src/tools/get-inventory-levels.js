@@ -42,28 +42,42 @@ const executeFunction = async ({ skus, product_id, store_Hash } = {}, { bc }) =>
         wanted.has(String(r.sku).toUpperCase())
       );
 
-      // Surface requested SKUs that matched nothing so four rows for six
-      // requests can't be misread as "all six came back". Original casing,
-      // de-duplicated in first-seen order.
+      // Every base + variant SKU across the RESOLVED products (uppercased). A
+      // requested SKU present here resolved to a product; absent, it did not.
+      // This distinguishes a SKU that resolved but produced no inventory row
+      // (e.g. a base SKU whose product exposes only variant-level rows) from one
+      // that isn't in the catalog at all — the same outward "missing" but
+      // different meanings mid-migration.
+      const resolvedSkus = new Set();
+      for (const p of products) {
+        if (p.sku) resolvedSkus.add(String(p.sku).toUpperCase());
+        for (const v of p.variants || []) {
+          if (v.sku) resolvedSkus.add(String(v.sku).toUpperCase());
+        }
+      }
+
+      // Requested SKUs that produced no row, each tagged with WHY. Original
+      // casing, de-duplicated in first-seen order.
       const present = new Set(matched.map((r) => String(r.sku).toUpperCase()));
       const missing_skus = [];
       const seen = new Set();
       for (const s of skus) {
         const key = String(s).toUpperCase();
-        if (!present.has(key) && !seen.has(key)) {
-          seen.add(key);
-          missing_skus.push(s);
-        }
+        if (present.has(key) || seen.has(key)) continue;
+        seen.add(key);
+        missing_skus.push({
+          sku: s,
+          reason: resolvedSkus.has(key) ? "no_inventory_row" : "not_in_catalog",
+        });
       }
 
-      // Keep the bare-array return when everything matched (clients/format
-      // depend on it); switch to a shape only when there is something to report.
-      if (missing_skus.length > 0) {
-        return { rows: matched, missing_skus };
-      }
-      return matched;
+      // Unconditional shape: always { rows, missing_skus } so a chained caller
+      // never has to branch on Array.isArray(result). missing_skus is [] when
+      // everything matched.
+      return { rows: matched, missing_skus };
     }
-    return rows;
+    // product_id lookup: no requested SKUs, so nothing can be "missing".
+    return { rows, missing_skus: [] };
   } catch (error) {
     if (error && error.code) throw error; // marked errors (e.g. budget) propagate
     return {
@@ -110,7 +124,7 @@ const apiTool = {
     function: {
       name: "get_inventory_levels",
       description:
-        "Get inventory levels for BigCommerce products/variants. Provide an array of SKUs, or alternatively a single product_id. SKU matching is case-insensitive; returned rows keep BigCommerce's stored casing. Returns one row per matching variant with sku, product_id, variant_id, inventory_level, inventory_warning_level, product_name, and is_visible. When every requested SKU matched, returns a bare array of rows; when one or more requested SKUs matched nothing, returns { rows: [...], missing_skus: [...] } instead so unmatched SKUs are explicit rather than silently absent.",
+        "Get inventory levels for BigCommerce products/variants. Provide an array of SKUs, or alternatively a single product_id. SKU matching is case-insensitive; returned rows keep BigCommerce's stored casing. ALWAYS returns { rows: [...], missing_skus: [...] } (one consistent shape — no bare-array case). Each row has sku, product_id, variant_id, inventory_level, inventory_warning_level, product_name, and is_visible. missing_skus lists every requested SKU that produced no row, each as { sku, reason } where reason is 'not_in_catalog' (the SKU resolved to no product) or 'no_inventory_row' (it resolved to a product but yielded no matching inventory row, e.g. a base SKU whose product exposes only variant-level rows); missing_skus is [] when everything matched and always [] for a product_id lookup.",
       parameters: {
         type: "object",
         properties: {
