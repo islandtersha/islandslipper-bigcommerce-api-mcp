@@ -100,6 +100,28 @@ async function callTool(id, params, env) {
       content: [{ type: "text", text: formatResult(result) }],
     });
   } catch (e) {
+    // A subrequest-budget exhaustion needs the opposite response to a transient
+    // BigCommerce error (stop and narrow / back off, vs retry). Label it
+    // distinctly and warn that any write issued earlier in THIS call may already
+    // have landed — the counter is per-request, so the ceiling can be hit after
+    // a successful PUT — so the caller must verify before retrying.
+    if (e && e.code === "SUBREQUEST_BUDGET_EXHAUSTED") {
+      return okResponse(id, {
+        content: [
+          {
+            type: "text",
+            text:
+              `Subrequest budget error (${e.code}): tool "${toolName}" reached ` +
+              `${e.subrequestCount} BigCommerce subrequests in one request and was stopped before ` +
+              `Cloudflare's hard ceiling. This is NOT a transient error — do not blindly retry. Any ` +
+              `write issued earlier in this call MAY already have been applied; verify current state ` +
+              `before retrying, and narrow the query or split the work (or back off if a 429 storm ` +
+              `caused it). Details: ${e.message}`,
+          },
+        ],
+        isError: true,
+      });
+    }
     return okResponse(id, {
       content: [{ type: "text", text: `Error: ${e.message}` }],
       isError: true,

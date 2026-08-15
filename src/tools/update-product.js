@@ -236,15 +236,23 @@ const executeFunction = async (
     // regenerates on the NEXT rename, the exact failure this tool prevents.
     if (expectedUrl) {
       let cu = readCustomUrlObj(putResp);
+      let verifyBudgetHit = false;
       if (!cu || cu.url === undefined) {
         // PUT response didn't echo custom_url — do ONE follow-up GET rather
         // than assume. custom_url is a default product field (no include).
+        // NOTE: this GET is the only subrequest in verification, and the PUT has
+        // already succeeded by now. If it throws the shared subrequest-budget
+        // error we deliberately swallow it here rather than let it escape to the
+        // dispatcher — the tool KNOWS the write landed, so it owns the
+        // write_applied: true shape. We just remember it happened so the
+        // could-not-verify message can say "budget" instead of "missing field".
         try {
           const fresh = await bc.get(`/v3/catalog/products/${product.id}`, {
             storeHash: store_Hash,
           });
           cu = readCustomUrlObj(fresh);
-        } catch {
+        } catch (e) {
+          if (e && e.code === "SUBREQUEST_BUDGET_EXHAUSTED") verifyBudgetHit = true;
           /* leave cu undefined → routed to could-not-verify below (fail safe) */
         }
       }
@@ -272,8 +280,11 @@ const executeFunction = async (
           write_applied: true,
           error_message:
             `Field changes were applied to product #${product.id}, but the resulting URL could ` +
-            `NOT be confirmed — BigCommerce did not return custom_url and the follow-up read ` +
-            `failed. The field update landed and does NOT need to be re-run; the URL is simply ` +
+            `NOT be confirmed — ${
+              verifyBudgetHit
+                ? "the per-request subrequest budget was exhausted before read-back verification could run"
+                : "BigCommerce did not return custom_url and the follow-up read failed"
+            }. The field update landed and does NOT need to be re-run; the URL is simply ` +
             `unverified (expected "${expectedUrl}").`,
           next_steps: [
             "Do NOT re-run this update — the field changes are already live.",

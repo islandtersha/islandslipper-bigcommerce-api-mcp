@@ -12,9 +12,11 @@ const BASE_URL = "https://api.bigcommerce.com/stores";
  * Free plan, 1000 on paid. This budget is shared across the WHOLE tool call —
  * pagination, resolveProduct, the write, and read-back verification all draw
  * from the same pool. We throw our own clear error at a soft cap safely below
- * 50 so it wins the race against Cloudflare's opaque abort at the ceiling, and
- * so a few subrequests remain for 429 retry fetches (which are real
- * subrequests this per-call counter doesn't split out).
+ * 50 so it wins the race against Cloudflare's opaque abort at the ceiling. The
+ * counter is incremented per ACTUAL fetch — 429 retries included — so the cap
+ * reflects real Cloudflare subrequest usage even under throttling; the gap
+ * below 50 is margin against that opaque abort, not an allowance for uncounted
+ * retries.
  */
 export const SUBREQUEST_SOFT_CAP = 45;
 
@@ -66,26 +68,20 @@ export class BcClient {
    * hint and retries (up to `maxRetries`).
    */
   async request(method, path, { body, storeHash, maxRetries = 4 } = {}) {
-    // Shared per-request subrequest budget (see SUBREQUEST_SOFT_CAP). Guard
-    // BEFORE issuing the subrequest so we throw a returnable error instead of
-    // letting the Worker hit the hard ceiling and abort opaquely. Counted once
-    // per bc.get/bc.put; 429 retry fetches below are extra real subrequests the
-    // soft cap's headroom absorbs.
-    if (this.subrequestCount >= SUBREQUEST_SOFT_CAP) {
-      throw new Error(
-        `Subrequest budget exhausted: tool "${this.toolName || "unknown"}" reached the soft cap ` +
-          `of ${SUBREQUEST_SOFT_CAP} BigCommerce subrequests in a single request (Cloudflare Workers ` +
-          `Free plan aborts at 50). The budget is shared across the whole tool call — pagination, ` +
-          `lookups, the write, and read-back verification all draw from it — so narrow the query or ` +
-          `split the work across calls. A paid Workers plan raises the ceiling to 1000.`
-      );
-    }
-    this.subrequestCount++;
-
     const url = this.#url(path, storeHash);
     let attempt = 0;
 
     for (;;) {
+      // Shared per-request subrequest budget (see SUBREQUEST_SOFT_CAP). Guard at
+      // the TOP of the loop so every actual fetch — first attempt AND each 429
+      // retry — is counted before it is issued. This throws a returnable error
+      // before the Worker hits the hard ceiling and aborts opaquely, and stays
+      // accurate under a 429 storm (each retry is a real subrequest).
+      if (this.subrequestCount >= SUBREQUEST_SOFT_CAP) {
+        throw subrequestBudgetError(this.toolName, this.subrequestCount, attempt);
+      }
+      this.subrequestCount++;
+
       const response = await fetch(url, {
         method,
         headers: this.#headers(),
@@ -141,6 +137,36 @@ export class BcClient {
   post(path, body, opts) {
     return this.request("POST", path, { ...opts, body });
   }
+}
+
+/**
+ * Build the shared-subrequest-budget error. `attempt` is the number of 429
+ * retries already performed in this request() call: 0 means the cap was hit
+ * pre-flight (the tool is over-fetching — narrow the query), > 0 means it was
+ * hit while retrying a rate-limited request (the store is being throttled —
+ * back off, don't narrow). Distinct wording so those get opposite responses.
+ */
+function subrequestBudgetError(toolName, count, attempt) {
+  const who = toolName || "unknown";
+  const msg =
+    attempt > 0
+      ? `Subrequest budget exhausted while RETRYING a rate-limited (429) request: tool "${who}" ` +
+        `reached the soft cap of ${SUBREQUEST_SOFT_CAP} BigCommerce subrequests (Cloudflare Workers ` +
+        `Free plan aborts at 50) on retry attempt ${attempt}, after ${count} subrequests. BigCommerce ` +
+        `is throttling this store and each 429 retry is itself a counted subrequest — back off and ` +
+        `retry later rather than narrowing the query. A paid Workers plan raises the ceiling to 1000.`
+      : `Subrequest budget exhausted: tool "${who}" reached the soft cap of ${SUBREQUEST_SOFT_CAP} ` +
+        `BigCommerce subrequests in a single request (Cloudflare Workers Free plan aborts at 50; ` +
+        `${count} subrequests, attempt ${attempt}). The budget is shared across the whole tool call — ` +
+        `pagination, lookups, the write, read-back verification, and 429 retries all draw from it — so ` +
+        `narrow the query or split the work across calls. A paid Workers plan raises the ceiling to 1000.`;
+  const err = new Error(msg);
+  // Distinguishing marker so the dispatcher (and tools) can tell a budget stop
+  // from a transient BigCommerce error — they need opposite responses.
+  err.code = "SUBREQUEST_BUDGET_EXHAUSTED";
+  err.subrequestCount = count;
+  err.attempt = attempt;
+  return err;
 }
 
 /** Convert a 429 response's headers into a delay in milliseconds. */
