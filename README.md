@@ -174,10 +174,15 @@ a whole blows the ceiling.
 To keep this visible and fail cleanly:
 
 - The request-scoped `bc` client carries a shared `subrequestCount`, incremented
-  on every `bc.get` / `bc.put`. When it reaches `SUBREQUEST_SOFT_CAP` (45, set
-  below 50 so our own error still returns and 429 retries have headroom), the
-  next call throws a clear error naming the tool and the count instead of
-  letting Cloudflare abort.
+  on every ACTUAL fetch — the first attempt **and each 429 retry** (a retry is a
+  real Cloudflare subrequest). When it reaches `SUBREQUEST_SOFT_CAP` (45, set
+  below 50 as margin against Cloudflare's opaque abort — not as an allowance for
+  uncounted retries), the next fetch throws a clear error naming the tool and the
+  count instead of letting Cloudflare abort. The error distinguishes the
+  pre-flight case (over-fetching → narrow the query) from exhaustion mid-retry
+  (the store is being throttled → back off), and carries
+  `code = "SUBREQUEST_BUDGET_EXHAUSTED"` so the dispatcher can report it
+  distinctly from a transient BigCommerce error.
 - `fetchAllPages` consults that shared counter in addition to its own `maxPages`
   cap, so a sweep that runs after other subrequests stops early.
 
