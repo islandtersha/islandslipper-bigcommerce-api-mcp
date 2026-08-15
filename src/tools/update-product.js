@@ -71,10 +71,10 @@ const executeFunction = async (
     const normalizedExistingUrl =
       existingUrl != null ? normalizeSlug(existingUrl) : undefined;
 
-    // Normalized "after" values: names lose trailing whitespace, URLs are
-    // slash-normalized, so we never diff (or write) a spurious change.
-    const nextName =
-      "name" in updates ? updates.name.replace(/\s+$/, "") : undefined;
+    // Normalized "after" values: names are trimmed (both ends), URLs are
+    // slash-normalized, so we never diff (or write) a spurious change. The
+    // trimmed name is what gets written — intended, and visible in changes.after.
+    const nextName = "name" in updates ? updates.name.trim() : undefined;
     const nextUrl = "url" in updates ? normalizeSlug(updates.url) : undefined;
 
     // Field-by-field diff of ONLY the fields actually changing.
@@ -161,17 +161,22 @@ const executeFunction = async (
       pinnedExistingSlug = true;
     }
 
-    // Pinning the existing slug flips is_customized true when it was false — a
-    // real, unrequested state change. Surface it (and its consequence) so the
-    // caller isn't blind to it.
-    const pinnedCustomizedFlip = pinnedExistingSlug && !existingIsCustomized;
-    if (pinnedCustomizedFlip) {
+    // Writing custom_url (either an explicit url OR pinning the existing slug on
+    // rename) sets is_customized: true. When it was false, that's a real state
+    // change — record it in the audit trail regardless of which path caused it.
+    const wroteCustomUrl = urlChanged || pinnedExistingSlug;
+    const isCustomizedFlip = wroteCustomUrl && !existingIsCustomized;
+    if (isCustomizedFlip) {
       changes.push({
         field: "custom_url.is_customized",
         before: false,
         after: true,
       });
     }
+    // The "URL no longer tracks the name" note is only a surprise on a
+    // rename-pin (the caller didn't touch the URL); the explicit-url path
+    // already carries its own 301 / verify next_steps.
+    const pinnedCustomizedFlip = pinnedExistingSlug && !existingIsCustomized;
 
     const resultingUrl = urlChanged ? nextUrl : normalizedExistingUrl;
 
@@ -233,16 +238,45 @@ const executeFunction = async (
       }
       const normalizedActual =
         actualUrl != null ? normalizeSlug(actualUrl) : undefined;
-      if (normalizedActual !== expectedUrl) {
+
+      if (normalizedActual === undefined) {
+        // Could NOT read the resulting URL (PUT omitted custom_url and the
+        // follow-up GET failed). This is a flaky subrequest, not a confirmed
+        // regeneration — a different problem from an actual slug change. Fail
+        // safe: the field write already applied, but the URL is unverified.
         return {
           ...base,
           status: "error",
+          write_applied: true,
           error_message:
-            `BigCommerce regenerated the product URL after the write. Expected ` +
-            `"${expectedUrl}" but the product now resolves to ` +
-            `"${normalizedActual ?? "(unknown)"}" — the expected URL will 404.`,
+            `Field changes were applied to product #${product.id}, but the resulting URL could ` +
+            `NOT be confirmed — BigCommerce did not return custom_url and the follow-up read ` +
+            `failed. The field update landed and does NOT need to be re-run; the URL is simply ` +
+            `unverified (expected "${expectedUrl}").`,
           next_steps: [
-            `Create a 301 redirect IMMEDIATELY: ${expectedUrl} -> ${normalizedActual ?? "(actual URL — fetch it)"}`,
+            "Do NOT re-run this update — the field changes are already live.",
+            `Manually check the product URL is still ${expectedUrl}; if BigCommerce regenerated it, create a 301 from ${expectedUrl} to the new URL.`,
+            ...next_steps,
+          ],
+        };
+      }
+
+      if (normalizedActual !== expectedUrl) {
+        // Confirmed silent regeneration — a live SEO fire. The PUT already
+        // succeeded, so the field changes are live; only the URL assertion
+        // failed. Do not present this as a failed write.
+        return {
+          ...base,
+          status: "error",
+          write_applied: true,
+          error_message:
+            `Field changes were applied to product #${product.id}, but BigCommerce regenerated ` +
+            `the product URL: expected "${expectedUrl}", the product now resolves to ` +
+            `"${normalizedActual}". The field update landed and does NOT need to be re-run — only ` +
+            `the URL assertion failed, and the expected URL will now 404.`,
+          next_steps: [
+            "Do NOT re-run this update — the field changes are already live, and re-pinning the slug will be overridden by BigCommerce identically.",
+            `Create a 301 redirect IMMEDIATELY: ${expectedUrl} -> ${normalizedActual}`,
             ...next_steps,
           ],
         };
@@ -277,6 +311,25 @@ function validateTypes(updates, keys) {
       typeof v !== "string"
     ) {
       return `\`updates.${field}\` must be a string.`;
+    }
+    // Reject absolute URLs before the write: normalizeSlug assumes a path, so
+    // "https://shop.example.com/products/t810/" would be mangled into
+    // "/https:/shop.example.com/products/t810/" and written verbatim. Catch a
+    // scheme ("://"), a protocol-relative "//host", or a leading host-looking
+    // segment (a dot before the first slash).
+    if (field === "url") {
+      const trimmed = v.trim();
+      const firstSegment = trimmed.replace(/^\/+/, "").split("/")[0];
+      if (
+        trimmed.includes("://") ||
+        trimmed.startsWith("//") ||
+        firstSegment.includes(".")
+      ) {
+        return (
+          "`updates.url` must be a path-only slug (e.g. '/products/t810-black/'), " +
+          "not an absolute URL or hostname. Pass just the path."
+        );
+      }
     }
   }
   return null;
@@ -357,7 +410,7 @@ const apiTool = {
     function: {
       name: "update_product",
       description:
-        "Update a single BigCommerce product's name, description, is_visible, and/or URL (Catalog Products API v3). Composable primitive: changes only the fields you pass. Identify the product by { product_id } or { sku } in `identifier`. WRITE TOOL — defaults to dry_run=true (reports the field-by-field diff without writing). SEO-safe URL handling: renaming a product NEVER changes its URL unless you explicitly supply `updates.url` — when name changes without a url, the existing slug is pinned as customized so BigCommerce does not auto-regenerate it. A rename of a product that has NO existing custom_url is REFUSED (nothing to pin) unless you pass `updates.url` or `allow_url_regeneration: true`. Supplying `url` applies the new slug and adds a 301-redirect reminder to next_steps (the redirect is NOT created for you). On a live run the resulting URL is verified against the PUT response and a silent BigCommerce slug regeneration is reported as status 'error' with a 301 next step. URL comparison is slash-normalized and description diffs are returned as lengths + 120-char previews (never the full body). Returns { product_id, sku, changes: [{field, before, after} | description:{before_length, after_length, before_preview, after_preview}], status: 'updated'|'no_changes'|'skipped_dry_run'|'error', error_message?, next_steps: [] }.",
+        "Update a single BigCommerce product's name, description, is_visible, and/or URL (Catalog Products API v3). Composable primitive: changes only the fields you pass. Identify the product by { product_id } or { sku } in `identifier`. WRITE TOOL — defaults to dry_run=true (reports the field-by-field diff without writing). SEO-safe URL handling: renaming a product NEVER changes its URL unless you explicitly supply `updates.url` — when name changes without a url, the existing slug is pinned as customized so BigCommerce does not auto-regenerate it. A rename of a product that has NO existing custom_url is REFUSED (nothing to pin) unless you pass `updates.url` or `allow_url_regeneration: true`. Supplying `url` applies the new slug and adds a 301-redirect reminder to next_steps (the redirect is NOT created for you). On a live run the resulting URL is verified against the PUT response and a silent BigCommerce slug regeneration is reported as status 'error' with a 301 next step. URL comparison is slash-normalized and description diffs are returned as lengths + 120-char previews (never the full body). Returns { product_id, sku, changes: [{field, before, after} | description:{before_length, after_length, before_preview, after_preview}], status: 'updated'|'no_changes'|'skipped_dry_run'|'error', write_applied?, error_message?, next_steps: [] }. write_applied is true on a status 'error' return where the field PUT already succeeded but the URL could not be confirmed or was regenerated — the field changes are LIVE and the call must NOT be re-run.",
       parameters: {
         type: "object",
         properties: {
