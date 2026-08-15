@@ -1,5 +1,9 @@
 /**
- * Shared BigCommerce Catalog v3 helpers used by the inventory tools.
+ * Shared BigCommerce Catalog v3 helpers — the common spine for both the
+ * inventory tools (get/update inventory levels) and the catalog write tools
+ * (update_product, and the upcoming assign_categories / set_visibility):
+ * product/SKU resolution, full-record fetches, pagination, and the category
+ * visibility computation.
  */
 
 import { SUBREQUEST_SOFT_CAP } from "../bc-client.js";
@@ -80,8 +84,13 @@ async function fetchProductsByIds(bc, ids, storeHash) {
   return products;
 }
 
-/** Fetch products (with variants) by product_id. Returns product objects. */
-export async function fetchProductsById(bc, productId, storeHash) {
+/**
+ * Fetch products (variants only, NO custom_fields) by a single product_id.
+ * Returns an array of product objects. Named to be unmistakable from
+ * fetchFullProductsByIds (variants AND custom_fields) so a caller needing the
+ * fuller record can't quietly import this leaner one.
+ */
+export async function fetchProductsWithVariantsById(bc, productId, storeHash) {
   return fetchProductsByIds(bc, [productId], storeHash);
 }
 
