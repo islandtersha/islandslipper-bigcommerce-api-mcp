@@ -31,6 +31,29 @@ is pasted once per client to approve it.
 | `get_refunds_summary` | Refund activity over an HST date window: refund count/total, unique orders refunded, avg days from order to refund, breakdown by original-order month, and top-10 refunds. Input: `start_date` (required), optional `end_date` (defaults to today in HST). |
 | `get_inventory_levels` | Inventory for a list of `skus` (or a `product_id`), including variants. |
 | `update_inventory` | Set `inventory_level` for a batch of SKUs. Defaults to `dry_run=true`. Respects BigCommerce rate limits. |
+| `update_product` | Update one product's `name`, `description`, and/or `is_visible`. Defaults to `dry_run=true`. **URL changes are not supported** — see below. |
+
+### `update_product` — URL handling
+
+`update_product` changes only `name`, `description`, and `is_visible`. It does
+**not** write product URLs:
+
+- `updates.url` (at any depth) and the old `allow_url_regeneration` argument are
+  **rejected** with a clear error. BigCommerce's V3 Catalog API does not create a
+  301 redirect when a URL changes (only the BC admin UI does), so an API-driven
+  URL change would silently break the indexed link with no recovery.
+- On **every rename** the product's existing `custom_url` is pinned back —
+  `url` kept **byte-identical**, `is_customized` set `true` — in the same PUT, so
+  BigCommerce never regenerates the slug from the new name. That pin is the
+  enforcement mechanism for the never-change-the-URL invariant.
+- A rename of a product that has **no `custom_url` to pin** returns
+  `status: "refused"` (there is no escape hatch — set the URL in BC admin first).
+- On a live rename the read-back verifies the URL did not move; a move is an
+  **invariant violation** and a hard error.
+
+**Reversibility:** URL changes are intentionally not supported. If MCP Tool 4
+(`set_redirect`) ships, `updates.url` can return to this tool paired with an
+automatic 301. Until then this invariant holds.
 
 ## Install & deploy
 
@@ -193,6 +216,11 @@ and split the work across calls (or paginate more narrowly) if it won't fit.
 Upgrading to a **paid Workers plan raises the ceiling to 1000**; at that point
 `fetchAllPages`'s `maxPages` default can go back up and `SUBREQUEST_SOFT_CAP`
 can be raised accordingly.
+
+## Known gaps
+
+- `update_product` accepts one product at a time. Batch form deferred until
+  whole-style retirement work.
 
 ## Upstream
 
