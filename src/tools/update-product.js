@@ -299,6 +299,18 @@ const executeFunction = async (
       // the PUT so the write-failure branch shares it.
       const pinRequestedNote = pinnedCustomizedFlip ? [PIN_UNCONFIRMED_STEP] : [];
 
+      // Keep `changes` as the attempted diff, but when a verification branch
+      // PROVES an entry did not land, annotate that one entry (attempted, not
+      // persisted, plus the actual final value) instead of silently rewriting
+      // it. Only for branches that proved non-persistence — not the unverified
+      // (could-not-verify / flag-omitted) ones.
+      const markNotPersisted = (field, actual) =>
+        changes.map((c) =>
+          c.field === field
+            ? { ...c, attempted: true, persisted: false, actual }
+            : c
+        );
+
       if (normalizedActual === undefined) {
         // Could NOT read the resulting URL (PUT omitted custom_url and the
         // follow-up GET failed). This is a flaky subrequest, not a confirmed
@@ -331,6 +343,9 @@ const executeFunction = async (
         // failed. Do not present this as a failed write.
         return {
           ...base,
+          // The url the caller asked to pin did not persist — annotate it (the
+          // regeneration also unpins, so the actual URL is what BC now serves).
+          changes: markNotPersisted("url", normalizedActual),
           status: "error",
           write_applied: true,
           error_message:
@@ -373,6 +388,10 @@ const executeFunction = async (
         // exact failure this tool exists to prevent. The field changes are live.
         return {
           ...base,
+          // The is_customized flip we recorded did NOT persist — annotate the
+          // entry with its actual final value so a log reader can see the URL is
+          // unpinned (this branch's whole point).
+          changes: markNotPersisted("custom_url.is_customized", actualIsCustomized),
           status: "error",
           write_applied: true,
           error_message:
