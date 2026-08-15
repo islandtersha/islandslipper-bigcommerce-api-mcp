@@ -71,6 +71,9 @@ const executeFunction = async (
     try {
       product = await resolveProduct(bc, identifier, store_Hash);
     } catch (e) {
+      // A marked error (e.code, e.g. the subrequest-budget error) must reach the
+      // dispatcher's dedicated handling — never flatten it to a generic string.
+      if (e && e.code) throw e;
       return { error: e.message };
     }
 
@@ -234,6 +237,8 @@ const executeFunction = async (
         storeHash: store_Hash,
       });
     } catch (err) {
+      // A marked error (e.code) propagates to the dispatcher's budget handling.
+      if (err && err.code) throw err;
       return {
         ...base,
         status: "error",
@@ -383,6 +388,9 @@ const executeFunction = async (
 
     return { ...base, status: "updated", next_steps };
   } catch (error) {
+    // Marked errors (e.code, e.g. subrequest-budget) propagate to the dispatcher
+    // rather than being flattened by this backstop.
+    if (error && error.code) throw error;
     return {
       error: `An error occurred while updating product: ${error.message}`,
     };

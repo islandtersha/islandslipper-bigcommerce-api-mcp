@@ -56,6 +56,7 @@ const executeFunction = async (
       storeHash: store_Hash,
     });
   } catch (error) {
+    if (error && error.code) throw error; // marked errors (e.g. budget) propagate
     return {
       error: `An error occurred while getting all customers: ${error.message}`,
     };

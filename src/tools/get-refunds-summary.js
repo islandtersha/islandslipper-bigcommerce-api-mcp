@@ -65,7 +65,11 @@ const executeFunction = async ({ start_date, end_date } = {}, { bc }) => {
       try {
         const order = await bc.get(`/v2/orders/${orderId}`);
         orderDateById.set(orderId, parseTimeMs(order?.date_created));
-      } catch {
+      } catch (e) {
+        // A marked error (e.code, e.g. subrequest-budget) must NOT be swallowed
+        // into a null date — rethrow so the dispatcher handles it. A per-order
+        // fetch failure otherwise degrades to an unknown date, as before.
+        if (e && e.code) throw e;
         orderDateById.set(orderId, null);
       }
     });
@@ -125,6 +129,7 @@ const executeFunction = async ({ start_date, end_date } = {}, { bc }) => {
       top_10_refunded_orders: topRefunds,
     };
   } catch (error) {
+    if (error && error.code) throw error; // marked errors (e.g. budget) propagate
     return {
       error: `An error occurred while summarizing refunds: ${error.message}`,
     };

@@ -101,6 +101,9 @@ const executeFunction = async (
           { storeHash: store_Hash }
         );
       } catch (err) {
+        // A marked error (e.code, e.g. subrequest-budget) propagates to the
+        // dispatcher rather than being flattened into a per-SKU error_message.
+        if (err && err.code) throw err;
         batchStatus = "error";
         batchError = err.message;
       }
@@ -120,6 +123,7 @@ const executeFunction = async (
       };
     });
   } catch (error) {
+    if (error && error.code) throw error;
     return {
       error: `An error occurred while updating inventory: ${error.message}`,
     };

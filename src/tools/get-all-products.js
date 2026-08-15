@@ -9,6 +9,7 @@ const executeFunction = async ({ store_Hash } = {}, { bc }) => {
   try {
     return await bc.get("/v3/catalog/products", { storeHash: store_Hash });
   } catch (error) {
+    if (error && error.code) throw error; // marked errors (e.g. budget) propagate
     return {
       error: `An error occurred while getting all products: ${error.message}`,
     };

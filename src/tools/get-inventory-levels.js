@@ -35,6 +35,7 @@ const executeFunction = async ({ skus, product_id, store_Hash } = {}, { bc }) =>
     }
     return rows;
   } catch (error) {
+    if (error && error.code) throw error; // marked errors (e.g. budget) propagate
     return {
       error: `An error occurred while getting inventory levels: ${error.message}`,
     };
