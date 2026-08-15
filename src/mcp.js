@@ -154,6 +154,11 @@ function formatResult(result) {
     if (Array.isArray(result.data)) {
       return `Found ${result.data.length} items:\n${JSON.stringify(result, null, 2)}`;
     }
+    // { rows, ... } shapes (e.g. get_inventory_levels) — count the rows and
+    // still print the whole object so sibling fields (missing_skus) show.
+    if (Array.isArray(result.rows)) {
+      return `Found ${result.rows.length} items:\n${JSON.stringify(result, null, 2)}`;
+    }
     return JSON.stringify(result, null, 2);
   }
   return String(result);
