@@ -145,13 +145,29 @@ export class BcClient {
 export const SUBREQUEST_BUDGET_EXHAUSTED = "SUBREQUEST_BUDGET_EXHAUSTED";
 
 /**
+ * Why a budget stop fired — lets the dispatcher say the correct reason instead
+ * of assuming the shared counter hit the ceiling (it hasn't, for a page cap or a
+ * pre-flight projection). `subrequestCount` is only "at the ceiling" for
+ * BUDGET_SPENT; for the others it's informational (subrequests spent so far).
+ */
+export const BudgetStopReason = {
+  BUDGET_SPENT: "budget_spent", // shared counter reached SUBREQUEST_SOFT_CAP
+  PAGE_CAP: "page_cap", // a single paginated sweep hit its own page cap
+  PROJECTED_OVER_BUDGET: "projected_over_budget", // known upcoming work won't fit
+};
+
+/**
  * Stamp the shared budget-exhaustion marker onto an Error so tools that build
  * their OWN budget-refusal message (e.g. get_refunds_summary's step-3
  * pre-flight) still reach the dispatcher's budget branch. Single source of the
- * marker shape (code + subrequestCount + attempt).
+ * marker shape (code + reason + subrequestCount + attempt).
  */
-export function markSubrequestBudgetError(err, { subrequestCount, attempt } = {}) {
+export function markSubrequestBudgetError(
+  err,
+  { reason, subrequestCount, attempt } = {}
+) {
   err.code = SUBREQUEST_BUDGET_EXHAUSTED;
+  err.reason = reason;
   err.subrequestCount = subrequestCount;
   err.attempt = attempt;
   return err;
@@ -183,6 +199,7 @@ function subrequestBudgetError(toolName, count, attempt) {
         `pagination, lookups, the write, read-back verification, and 429 retries all draw from it — so ` +
         `narrow the query or split the work across calls. A paid Workers plan raises the ceiling to 1000.`;
   return markSubrequestBudgetError(new Error(msg), {
+    reason: BudgetStopReason.BUDGET_SPENT,
     subrequestCount: count,
     attempt,
   });

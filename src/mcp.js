@@ -8,7 +8,12 @@
  */
 
 import { tools } from "./tools/index.js";
-import { createBcClient } from "./bc-client.js";
+import {
+  createBcClient,
+  SUBREQUEST_BUDGET_EXHAUSTED,
+  SUBREQUEST_SOFT_CAP,
+  BudgetStopReason,
+} from "./bc-client.js";
 
 export const SERVER_NAME = "islandslipper-bc-mcp";
 export const SERVER_VERSION = "2.0.0";
@@ -121,18 +126,25 @@ async function callTool(id, params, env) {
     // distinctly and warn that any write issued earlier in THIS call may already
     // have landed — the counter is per-request, so the ceiling can be hit after
     // a successful PUT — so the caller must verify before retrying.
-    if (e && e.code === "SUBREQUEST_BUDGET_EXHAUSTED") {
+    if (e && e.code === SUBREQUEST_BUDGET_EXHAUSTED) {
+      // Say WHY it stopped from e.reason — the count is only "at the ceiling"
+      // for BUDGET_SPENT; a page cap or a pre-flight projection stops for a
+      // different reason and asserting the count there would misrepresent it.
+      const why =
+        {
+          [BudgetStopReason.BUDGET_SPENT]: `reached the shared subrequest soft cap (${e.subrequestCount}/${SUBREQUEST_SOFT_CAP}) and was stopped before Cloudflare's hard ceiling of 50`,
+          [BudgetStopReason.PAGE_CAP]: `hit a single-sweep pagination page cap before finishing (too many pages for one paginated call)`,
+          [BudgetStopReason.PROJECTED_OVER_BUDGET]: `was refused before starting because the work it still needs would exceed the remaining shared subrequest budget`,
+        }[e.reason] || `was stopped by its shared subrequest-budget guard`;
       return okResponse(id, {
         content: [
           {
             type: "text",
             text:
-              `Subrequest budget error (${e.code}): tool "${toolName}" reached ` +
-              `${e.subrequestCount} BigCommerce subrequests in one request and was stopped before ` +
-              `Cloudflare's hard ceiling. This is NOT a transient error — do not blindly retry. Any ` +
-              `write issued earlier in this call MAY already have been applied; verify current state ` +
-              `before retrying, and narrow the query or split the work (or back off if a 429 storm ` +
-              `caused it). Details: ${e.message}`,
+              `Subrequest budget error (${e.code}): tool "${toolName}" ${why}. This is NOT a ` +
+              `transient error — do not blindly retry. Any write issued earlier in this call MAY ` +
+              `already have been applied; verify current state before retrying, and narrow the query ` +
+              `or split the work (or back off if a 429 storm caused it). Details: ${e.message}`,
           },
         ],
         isError: true,

@@ -18,6 +18,7 @@
 import {
   SUBREQUEST_SOFT_CAP,
   markSubrequestBudgetError,
+  BudgetStopReason,
 } from "../bc-client.js";
 
 const HST_OFFSET = "-10:00";
@@ -90,7 +91,11 @@ const executeFunction = async ({ start_date, end_date } = {}, { bc }) => {
             `Refusing to start rather than return a summary computed from partially-loaded order ` +
             `dates — narrow the date range and retry.`
         ),
-        { subrequestCount: spent, attempt: 0 }
+        {
+          reason: BudgetStopReason.PROJECTED_OVER_BUDGET,
+          subrequestCount: spent,
+          attempt: 0,
+        }
       );
     }
 
@@ -192,7 +197,11 @@ async function fetchAllRefunds(bc) {
             `room for the non-pagination subrequests in the same request (the per-order date lookups in ` +
             `step 3); raise maxPages or narrow the query.`
         ),
-        { subrequestCount: bc.subrequestCount || 0, attempt: 0 }
+        {
+          reason: BudgetStopReason.PAGE_CAP,
+          subrequestCount: bc.subrequestCount || 0,
+          attempt: 0,
+        }
       );
     }
     const spent = bc.subrequestCount || 0;
@@ -205,7 +214,11 @@ async function fetchAllRefunds(bc) {
             `call — refund pagination and the per-order date lookups all count — so narrow the query or ` +
             `split the work. A paid Workers plan raises the ceiling to 1000.`
         ),
-        { subrequestCount: spent, attempt: 0 }
+        {
+          reason: BudgetStopReason.BUDGET_SPENT,
+          subrequestCount: spent,
+          attempt: 0,
+        }
       );
     }
 
