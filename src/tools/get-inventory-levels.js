@@ -11,7 +11,10 @@ import {
 const executeFunction = async ({ skus, product_id, store_Hash } = {}, { bc }) => {
   try {
     const hasSkus = Array.isArray(skus) && skus.length > 0;
-    if (!hasSkus && product_id === undefined) {
+    // Treat product_id: null the same as undefined — otherwise null slips past
+    // the guard and builds an `id:in=null` query that silently returns nothing.
+    const hasProductId = product_id !== undefined && product_id !== null;
+    if (!hasSkus && !hasProductId) {
       return {
         error:
           "Provide either a non-empty `skus` array or a `product_id`.",
@@ -28,10 +31,37 @@ const executeFunction = async ({ skus, product_id, store_Hash } = {}, { bc }) =>
     const rows = flattenRows(products);
 
     // When filtering by SKU, only return the requested SKUs (a product may
-    // carry sibling variants we didn't ask about).
+    // carry sibling variants we didn't ask about). Compare case-INSENSITIVELY
+    // to match fetchProductsBySkus / findProductIdsBySku — BigCommerce's sku:in
+    // is case-insensitive, so a lowercase query resolves an uppercase-stored
+    // SKU, and a byte-exact filter here would drop every resolved row and
+    // falsely report the SKU as missing. Returned rows keep their stored casing.
     if (hasSkus) {
-      const wanted = new Set(skus.map(String));
-      return rows.filter((r) => wanted.has(String(r.sku)));
+      const wanted = new Set(skus.map((s) => String(s).toUpperCase()));
+      const matched = rows.filter((r) =>
+        wanted.has(String(r.sku).toUpperCase())
+      );
+
+      // Surface requested SKUs that matched nothing so four rows for six
+      // requests can't be misread as "all six came back". Original casing,
+      // de-duplicated in first-seen order.
+      const present = new Set(matched.map((r) => String(r.sku).toUpperCase()));
+      const missing_skus = [];
+      const seen = new Set();
+      for (const s of skus) {
+        const key = String(s).toUpperCase();
+        if (!present.has(key) && !seen.has(key)) {
+          seen.add(key);
+          missing_skus.push(s);
+        }
+      }
+
+      // Keep the bare-array return when everything matched (clients/format
+      // depend on it); switch to a shape only when there is something to report.
+      if (missing_skus.length > 0) {
+        return { rows: matched, missing_skus };
+      }
+      return matched;
     }
     return rows;
   } catch (error) {
@@ -80,7 +110,7 @@ const apiTool = {
     function: {
       name: "get_inventory_levels",
       description:
-        "Get inventory levels for BigCommerce products/variants. Provide an array of SKUs, or alternatively a single product_id. Returns one row per matching variant with sku, product_id, variant_id, inventory_level, inventory_warning_level, product_name, and is_visible.",
+        "Get inventory levels for BigCommerce products/variants. Provide an array of SKUs, or alternatively a single product_id. SKU matching is case-insensitive; returned rows keep BigCommerce's stored casing. Returns one row per matching variant with sku, product_id, variant_id, inventory_level, inventory_warning_level, product_name, and is_visible. When every requested SKU matched, returns a bare array of rows; when one or more requested SKUs matched nothing, returns { rows: [...], missing_skus: [...] } instead so unmatched SKUs are explicit rather than silently absent.",
       parameters: {
         type: "object",
         properties: {
