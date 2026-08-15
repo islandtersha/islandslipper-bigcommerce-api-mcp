@@ -64,10 +64,20 @@ const executeFunction = async (
     // adjustments call and reported as individual errors (one bad SKU must not
     // fail the whole batch).
     const entries = updates.map(({ sku, new_inventory_level }) => {
-      const target = bySku.get(String(sku));
+      // Uppercase the lookup key: indexVariantsBySku keys by uppercased SKU
+      // (BC resolves sku:in case-insensitively). `resolved_sku` keeps the
+      // canonical STORED casing for the write below; results still echo the
+      // caller's original `sku`.
+      const target = bySku.get(String(sku).toUpperCase());
       const after = Number(new_inventory_level);
       return target
-        ? { sku, after, before: target.inventory_level, resolved: true }
+        ? {
+            sku,
+            resolved_sku: target.sku,
+            after,
+            before: target.inventory_level,
+            resolved: true,
+          }
         : { sku, after, before: null, resolved: false };
     });
 
@@ -92,7 +102,10 @@ const executeFunction = async (
         const locationId = await resolveInventoryLocationId(bc, store_Hash);
         const items = resolved.map((e) => ({
           location_id: locationId,
-          sku: e.sku,
+          // Write the canonical stored SKU, not the caller's input casing — the
+          // adjustments endpoint would otherwise risk a silent no-op on a
+          // case-mismatched SKU. Falls back to the input if somehow absent.
+          sku: e.resolved_sku || e.sku,
           quantity: e.after,
         }));
         await bc.put(
