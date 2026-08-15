@@ -200,7 +200,20 @@ const executeFunction = async (
       visibilityAfter: updates.is_visible,
     });
 
-    const base = { product_id: product.id, sku: product.sku, changes };
+    // Echo the caller's identifier verbatim. `sku` is the product's BASE sku,
+    // which differs from a variant sku the caller may have passed (e.g.
+    // "PT202-WHIS-8" resolves to base "PT202") — identifier_used keeps a
+    // migration log row traceable to the exact call that produced it.
+    const identifier_used =
+      identifier && typeof identifier === "object" && !Array.isArray(identifier)
+        ? { ...identifier }
+        : identifier;
+    const base = {
+      product_id: product.id,
+      sku: product.sku,
+      identifier_used,
+      changes,
+    };
 
     // Nothing differs — identical outcome for dry and live runs.
     if (changes.length === 0) {
@@ -491,7 +504,7 @@ const apiTool = {
     function: {
       name: "update_product",
       description:
-        "Update a single BigCommerce product's name, description, is_visible, and/or URL (Catalog Products API v3). Composable primitive: changes only the fields you pass. Identify the product by { product_id } or { sku } in `identifier`. WRITE TOOL — defaults to dry_run=true (reports the field-by-field diff without writing). SEO-safe URL handling: renaming a product NEVER changes its URL unless you explicitly supply `updates.url` — when name changes without a url, the existing slug is pinned as customized so BigCommerce does not auto-regenerate it. A rename of a product that has NO existing custom_url is REFUSED (nothing to pin) unless you pass `updates.url` or `allow_url_regeneration: true`. Supplying `url` applies the new slug and adds a 301-redirect reminder to next_steps (the redirect is NOT created for you). On a live run the resulting URL is verified against the PUT response and a silent BigCommerce slug regeneration is reported as status 'error' with a 301 next step. URL comparison is slash-normalized and description diffs are returned as lengths + 120-char previews (never the full body). Returns { product_id, sku, changes: [{field, before, after} | description:{before_length, after_length, before_preview, after_preview}], status: 'updated'|'no_changes'|'skipped_dry_run'|'error', write_applied?, error_message?, next_steps: [] }. write_applied is true on a status 'error' return where the field PUT already succeeded but the URL could not be confirmed or was regenerated — the field changes are LIVE and the call must NOT be re-run.",
+        "Update a single BigCommerce product's name, description, is_visible, and/or URL (Catalog Products API v3). Composable primitive: changes only the fields you pass. Identify the product by { product_id } or { sku } in `identifier`. WRITE TOOL — defaults to dry_run=true (reports the field-by-field diff without writing). SEO-safe URL handling: renaming a product NEVER changes its URL unless you explicitly supply `updates.url` — when name changes without a url, the existing slug is pinned as customized so BigCommerce does not auto-regenerate it. A rename of a product that has NO existing custom_url is REFUSED (nothing to pin) unless you pass `updates.url` or `allow_url_regeneration: true`. Supplying `url` applies the new slug and adds a 301-redirect reminder to next_steps (the redirect is NOT created for you). On a live run the resulting URL is verified against the PUT response and a silent BigCommerce slug regeneration is reported as status 'error' with a 301 next step. URL comparison is slash-normalized and description diffs are returned as lengths + 120-char previews (never the full body). Returns { product_id, sku, identifier_used, changes: [{field, before, after} | description:{before_length, after_length, before_preview, after_preview}], status: 'updated'|'no_changes'|'skipped_dry_run'|'error', write_applied?, error_message?, next_steps: [] }. `sku` is the product's BASE sku; `identifier_used` echoes the identifier you passed verbatim (e.g. the variant sku), so a result stays traceable to its call even when a variant sku resolves to a different base sku. write_applied is true on a status 'error' return where the field PUT already succeeded but the URL could not be confirmed or was regenerated — the field changes are LIVE and the call must NOT be re-run.",
       parameters: {
         type: "object",
         properties: {

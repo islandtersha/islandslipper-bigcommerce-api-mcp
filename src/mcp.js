@@ -72,7 +72,23 @@ async function callTool(id, params, env) {
     return errorResponse(id, -32602, `Unknown tool: ${toolName}`);
   }
 
-  const args = params.arguments || {};
+  // `arguments` may be omitted (→ {}), but if present it must be a plain object.
+  // A string or array would otherwise reach the tool, destructure to undefined,
+  // and trip each tool's own validation with a confusing message.
+  const rawArgs = params?.arguments;
+  if (
+    rawArgs !== undefined &&
+    rawArgs !== null &&
+    (typeof rawArgs !== "object" || Array.isArray(rawArgs))
+  ) {
+    return errorResponse(
+      id,
+      -32602,
+      "`arguments` must be an object mapping parameter names to values."
+    );
+  }
+
+  const args = rawArgs || {};
   const required = tool.definition.function.parameters?.required || [];
   for (const key of required) {
     if (!(key in args)) {
