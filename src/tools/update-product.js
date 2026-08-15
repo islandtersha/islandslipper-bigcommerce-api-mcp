@@ -300,16 +300,25 @@ const executeFunction = async (
       const pinRequestedNote = pinnedCustomizedFlip ? [PIN_UNCONFIRMED_STEP] : [];
 
       // Keep `changes` as the attempted diff, but when a verification branch
-      // PROVES an entry did not land, annotate that one entry (attempted, not
+      // PROVES an entry did not land, annotate those entries (attempted, not
       // persisted, plus the actual final value) instead of silently rewriting
-      // it. Only for branches that proved non-persistence — not the unverified
-      // (could-not-verify / flag-omitted) ones.
-      const markNotPersisted = (field, actual) =>
-        changes.map((c) =>
-          c.field === field
-            ? { ...c, attempted: true, persisted: false, actual }
-            : c
-        );
+      // them. Only for branches that proved non-persistence — not the unverified
+      // (could-not-verify / flag-omitted) ones. Takes a list of { field, actual }
+      // so multiple entries are annotated in ONE pass over `changes` (two
+      // sequential single-field calls would each map the original array and the
+      // second would drop the first's annotation).
+      //
+      // A { field } with no matching entry in `changes` is intentionally a
+      // no-op: nothing was attempted for that field (e.g. a rename-pin
+      // regeneration has no "url" entry because the caller passed no updates.url),
+      // so there is nothing to mark as not-persisted.
+      const markNotPersisted = (pairs) =>
+        changes.map((c) => {
+          const hit = pairs.find((p) => p.field === c.field);
+          return hit
+            ? { ...c, attempted: true, persisted: false, actual: hit.actual }
+            : c;
+        });
 
       if (normalizedActual === undefined) {
         // Could NOT read the resulting URL (PUT omitted custom_url and the
@@ -343,9 +352,16 @@ const executeFunction = async (
         // failed. Do not present this as a failed write.
         return {
           ...base,
-          // The url the caller asked to pin did not persist — annotate it (the
-          // regeneration also unpins, so the actual URL is what BC now serves).
-          changes: markNotPersisted("url", normalizedActual),
+          // Regeneration proves BOTH failed to persist: the url is not what we
+          // pinned, and because the slug regenerated the is_customized pin did
+          // not hold either. Annotate both (is_customized: actual = whatever the
+          // response carried, undefined if absent — the regeneration is itself
+          // proof it did not stick). A missing url/is_customized entry (e.g. a
+          // rename-pin with no updates.url) is a no-op, per markNotPersisted.
+          changes: markNotPersisted([
+            { field: "url", actual: normalizedActual },
+            { field: "custom_url.is_customized", actual: actualIsCustomized },
+          ]),
           status: "error",
           write_applied: true,
           error_message:
@@ -391,7 +407,9 @@ const executeFunction = async (
           // The is_customized flip we recorded did NOT persist — annotate the
           // entry with its actual final value so a log reader can see the URL is
           // unpinned (this branch's whole point).
-          changes: markNotPersisted("custom_url.is_customized", actualIsCustomized),
+          changes: markNotPersisted([
+            { field: "custom_url.is_customized", actual: actualIsCustomized },
+          ]),
           status: "error",
           write_applied: true,
           error_message:
