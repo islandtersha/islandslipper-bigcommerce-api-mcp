@@ -2,6 +2,8 @@
  * Shared BigCommerce Catalog v3 helpers used by the inventory tools.
  */
 
+import { SUBREQUEST_SOFT_CAP } from "../bc-client.js";
+
 /** BigCommerce caps `sku:in` URLs; chunk large SKU lists to stay safe. */
 const SKU_CHUNK_SIZE = 50;
 
@@ -401,13 +403,15 @@ export function chunk(arr, size) {
  * Subrequest guard: each page is one Cloudflare Workers subrequest, and the
  * Worker aborts opaquely once the platform's per-request subrequest limit is
  * hit (50 on the Free plan, 1000 on paid). To fail loudly and early instead,
- * a single sweep throws a clear error if it would exceed `maxPages` (default
- * 30 — deliberately below the Free-plan ceiling, leaving headroom for the
- * NON-pagination subrequests a single tool call also spends: resolveProduct,
- * the write itself, and read-back verification all share the same 50-subrequest
- * budget, so the cap cannot claim the whole ceiling for pagination). Raise
- * `maxPages` on a paid plan, or narrow the query, if a legitimate sweep needs
- * more pages.
+ * a sweep is bounded TWO ways:
+ *   - its own `maxPages` (default 30) — a sanity cap on a single pagination run;
+ *   - the SHARED per-request subrequest counter on the `bc` client, so a sweep
+ *     that runs AFTER other subrequests (lookups, a write, read-back
+ *     verification) stops before the whole tool call blows the ceiling, even
+ *     when its own page count is well under maxPages.
+ * The shared counter is the real ceiling; `maxPages` just keeps one runaway
+ * sweep from claiming the entire budget. Raise `maxPages` on a paid plan, or
+ * narrow the query, if a legitimate sweep needs more pages.
  */
 export async function fetchAllPages(
   bc,
@@ -426,6 +430,20 @@ export async function fetchAllPages(
           `(limit 50 on Free, 1000 on paid), and the cap stays below that ceiling on purpose to leave ` +
           `room for the non-pagination subrequests in the same request (resolveProduct, the write, and ` +
           `read-back verification); raise maxPages or narrow the query.`
+      );
+    }
+
+    // Consult the SHARED per-request budget, not just our own page count: other
+    // subrequests in this tool call have already drawn from the same 50-request
+    // pool. Stop before the next page would tip the whole request over.
+    const spent = bc.subrequestCount || 0;
+    if (spent >= SUBREQUEST_SOFT_CAP) {
+      throw new Error(
+        `fetchAllPages stopped paginating "${path}" after ${pagesFetched} page(s): the shared ` +
+          `per-request subrequest budget is exhausted (${spent}/${SUBREQUEST_SOFT_CAP} soft cap, ` +
+          `Cloudflare Workers Free plan aborts at 50). This budget is shared across the whole tool ` +
+          `call — lookups, writes, and read-back verification all count — so narrow the query or split ` +
+          `the work. A paid Workers plan raises the ceiling to 1000.`
       );
     }
 
