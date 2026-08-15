@@ -26,6 +26,15 @@ import { resolveProduct } from "./catalog-helpers.js";
 const UPDATABLE_FIELDS = ["name", "description", "is_visible", "url"];
 const PREVIEW_CHARS = 120;
 
+// Asserts the pin took effect — only true once verification confirms it, so it
+// is stripped from every error branch (defined here so buildNextSteps and the
+// filters stay in sync).
+const PINNED_CUSTOMIZED_STEP =
+  "URL is now pinned as customized (is_customized true) and will no longer track the product name; supply updates.url explicitly if a future name change should also change the slug.";
+// The could-not-verify replacement: the pin was requested but not confirmed.
+const PIN_UNCONFIRMED_STEP =
+  "The customized-URL pin was REQUESTED but could NOT be confirmed — check custom_url.is_customized is true in BC admin (an unpinned URL regenerates on the next rename).";
+
 const executeFunction = async (
   {
     identifier,
@@ -221,23 +230,36 @@ const executeFunction = async (
     }
 
     // POST-WRITE URL VERIFICATION — the whole premise of the tool is that a
-    // rename never silently changes the URL, so prove it landed.
+    // rename never silently changes the URL, so prove BOTH the slug AND the
+    // is_customized pin landed. Confirming only the url would let BC return the
+    // expected slug with is_customized still false — an unpinned URL that
+    // regenerates on the NEXT rename, the exact failure this tool prevents.
     if (expectedUrl) {
-      let actualUrl = readCustomUrl(putResp);
-      if (actualUrl === undefined) {
+      let cu = readCustomUrlObj(putResp);
+      if (!cu || cu.url === undefined) {
         // PUT response didn't echo custom_url — do ONE follow-up GET rather
         // than assume. custom_url is a default product field (no include).
         try {
           const fresh = await bc.get(`/v3/catalog/products/${product.id}`, {
             storeHash: store_Hash,
           });
-          actualUrl = readCustomUrl(fresh);
+          cu = readCustomUrlObj(fresh);
         } catch {
-          /* leave undefined → treated as a mismatch below (fail safe) */
+          /* leave cu undefined → routed to could-not-verify below (fail safe) */
         }
       }
+      const actualUrl = cu ? cu.url : undefined;
       const normalizedActual =
         actualUrl != null ? normalizeSlug(actualUrl) : undefined;
+      const actualIsCustomized = cu ? cu.is_customized : undefined;
+
+      // The pinned-customized assertion is only true on the confirmed-success
+      // path — strip it from every error branch. On could-not-verify, replace
+      // it with the "pin requested but unconfirmed" note.
+      const nextStepsNoPin = next_steps.filter(
+        (s) => s !== PINNED_CUSTOMIZED_STEP
+      );
+      const pinRequestedNote = pinnedCustomizedFlip ? [PIN_UNCONFIRMED_STEP] : [];
 
       if (normalizedActual === undefined) {
         // Could NOT read the resulting URL (PUT omitted custom_url and the
@@ -256,7 +278,8 @@ const executeFunction = async (
           next_steps: [
             "Do NOT re-run this update — the field changes are already live.",
             `Manually check the product URL is still ${expectedUrl}; if BigCommerce regenerated it, create a 301 from ${expectedUrl} to the new URL.`,
-            ...next_steps,
+            ...pinRequestedNote,
+            ...nextStepsNoPin,
           ],
         };
       }
@@ -277,7 +300,49 @@ const executeFunction = async (
           next_steps: [
             "Do NOT re-run this update — the field changes are already live, and re-pinning the slug will be overridden by BigCommerce identically.",
             `Create a 301 redirect IMMEDIATELY: ${expectedUrl} -> ${normalizedActual}`,
-            ...next_steps,
+            ...nextStepsNoPin,
+          ],
+        };
+      }
+
+      // URL matches. Now confirm the is_customized pin actually took.
+      if (actualIsCustomized === undefined) {
+        // Response carried the url but omitted is_customized — the pin is
+        // unverifiable. Route to could-not-verify rather than assume success.
+        return {
+          ...base,
+          status: "error",
+          write_applied: true,
+          error_message:
+            `Field changes and the URL "${expectedUrl}" landed on product #${product.id}, but the ` +
+            `response did not include custom_url.is_customized, so the pin could NOT be confirmed. ` +
+            `The field update landed and does NOT need to be re-run; the URL's pinned state is ` +
+            `unverified — if it is not customized it will regenerate on the next rename.`,
+          next_steps: [
+            "Do NOT re-run this update — the field changes are already live.",
+            `Check custom_url.is_customized is true for ${expectedUrl} in BC admin.`,
+            ...nextStepsNoPin,
+          ],
+        };
+      }
+
+      if (actualIsCustomized !== true) {
+        // URL is correct but the pin did NOT take (is_customized still false).
+        // The slug is unprotected and will regenerate on the next rename — the
+        // exact failure this tool exists to prevent. The field changes are live.
+        return {
+          ...base,
+          status: "error",
+          write_applied: true,
+          error_message:
+            `Field changes were applied to product #${product.id} and the URL "${expectedUrl}" ` +
+            `landed, but custom_url.is_customized did NOT take (still false). The URL is NOT ` +
+            `protected from future renames and will regenerate on the next rename. The field ` +
+            `changes are live and do NOT need to be re-run.`,
+          next_steps: [
+            `Set the URL ${expectedUrl} as customized (is_customized true) in BC admin so it survives future renames.`,
+            "Do NOT re-run this update — the field changes are already live.",
+            ...nextStepsNoPin,
           ],
         };
       }
@@ -352,9 +417,16 @@ function preview(s) {
   return str.length > PREVIEW_CHARS ? `${str.slice(0, PREVIEW_CHARS)}…` : str;
 }
 
-/** Pull custom_url.url out of a BC product envelope ({ data: { custom_url } }). */
+/** Pull the custom_url object ({ url, is_customized }) from a BC product envelope. */
+function readCustomUrlObj(resp) {
+  return resp && resp.data && resp.data.custom_url
+    ? resp.data.custom_url
+    : undefined;
+}
+
+/** Pull just custom_url.url out of a BC product envelope. */
 function readCustomUrl(resp) {
-  const cu = resp && resp.data && resp.data.custom_url;
+  const cu = readCustomUrlObj(resp);
   return cu ? cu.url : undefined;
 }
 
@@ -379,9 +451,7 @@ function buildNextSteps({
     steps.push("Check Klaviyo product blocks referencing old name");
   }
   if (pinnedCustomizedFlip) {
-    steps.push(
-      "URL is now pinned as customized (is_customized true) and will no longer track the product name; supply updates.url explicitly if a future name change should also change the slug."
-    );
+    steps.push(PINNED_CUSTOMIZED_STEP);
   }
   if (visibilityChanged && visibilityAfter === false) {
     // Product Discontinuation SOP — the Vault transition.
