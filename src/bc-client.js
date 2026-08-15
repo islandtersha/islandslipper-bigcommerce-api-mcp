@@ -139,6 +139,24 @@ export class BcClient {
   }
 }
 
+/** The err.code every subrequest-budget stop carries so mcp.js's dispatcher
+ * (and tool catches) can tell it from a transient BigCommerce error — they need
+ * opposite responses. */
+export const SUBREQUEST_BUDGET_EXHAUSTED = "SUBREQUEST_BUDGET_EXHAUSTED";
+
+/**
+ * Stamp the shared budget-exhaustion marker onto an Error so tools that build
+ * their OWN budget-refusal message (e.g. get_refunds_summary's step-3
+ * pre-flight) still reach the dispatcher's budget branch. Single source of the
+ * marker shape (code + subrequestCount + attempt).
+ */
+export function markSubrequestBudgetError(err, { subrequestCount, attempt } = {}) {
+  err.code = SUBREQUEST_BUDGET_EXHAUSTED;
+  err.subrequestCount = subrequestCount;
+  err.attempt = attempt;
+  return err;
+}
+
 /**
  * Build the shared-subrequest-budget error. `attempt` is the number of 429
  * retries already performed in this request() call: 0 means the cap was hit
@@ -164,13 +182,10 @@ function subrequestBudgetError(toolName, count, attempt) {
         `${count} subrequests, attempt ${attempt}). The budget is shared across the whole tool call — ` +
         `pagination, lookups, the write, read-back verification, and 429 retries all draw from it — so ` +
         `narrow the query or split the work across calls. A paid Workers plan raises the ceiling to 1000.`;
-  const err = new Error(msg);
-  // Distinguishing marker so the dispatcher (and tools) can tell a budget stop
-  // from a transient BigCommerce error — they need opposite responses.
-  err.code = "SUBREQUEST_BUDGET_EXHAUSTED";
-  err.subrequestCount = count;
-  err.attempt = attempt;
-  return err;
+  return markSubrequestBudgetError(new Error(msg), {
+    subrequestCount: count,
+    attempt,
+  });
 }
 
 /** Convert a 429 response's headers into a delay in milliseconds. */

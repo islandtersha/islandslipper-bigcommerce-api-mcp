@@ -15,7 +15,10 @@
  * loudly instead of aborting opaquely or returning a partial summary.
  */
 
-import { SUBREQUEST_SOFT_CAP } from "../bc-client.js";
+import {
+  SUBREQUEST_SOFT_CAP,
+  markSubrequestBudgetError,
+} from "../bc-client.js";
 
 const HST_OFFSET = "-10:00";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -73,16 +76,22 @@ const executeFunction = async ({ start_date, end_date } = {}, { bc }) => {
     // of whatever pagination already spent. If they won't all fit in the shared
     // budget, refuse BEFORE starting — a half-populated orderDateById would
     // yield a summary computed from incomplete data and report it as success.
-    const remaining = SUBREQUEST_SOFT_CAP - (bc.subrequestCount || 0);
+    const spent = bc.subrequestCount || 0;
+    const remaining = SUBREQUEST_SOFT_CAP - spent;
     if (orderIds.length > remaining) {
-      return {
-        error:
+      // A budget stop, not a generic failure — throw it MARKED so the outer
+      // catch rethrows it (it rethrows anything with err.code) and mcp.js's
+      // budget branch labels it "narrow the query", not "something broke".
+      throw markSubrequestBudgetError(
+        new Error(
           `Refund window ${start_date}..${endDate} references ${orderIds.length} unique orders ` +
-          `needing a date lookup, but only ${remaining} subrequest(s) remain in this request's shared ` +
-          `budget (${bc.subrequestCount || 0}/${SUBREQUEST_SOFT_CAP} already spent; Cloudflare Free ` +
-          `plan aborts at 50). Refusing to start rather than return a summary computed from ` +
-          `partially-loaded order dates — narrow the date range and retry.`,
-      };
+            `needing a date lookup, but only ${remaining} subrequest(s) remain in this request's shared ` +
+            `budget (${spent}/${SUBREQUEST_SOFT_CAP} already spent; Cloudflare Free plan aborts at 50). ` +
+            `Refusing to start rather than return a summary computed from partially-loaded order ` +
+            `dates — narrow the date range and retry.`
+        ),
+        { subrequestCount: spent, attempt: 0 }
+      );
     }
 
     const orderDateById = new Map();
@@ -173,22 +182,30 @@ async function fetchAllRefunds(bc) {
     // endpoint's pagination is terminated on a short page (robust whether or not
     // it returns meta.pagination) rather than via fetchAllPages.
     if (pagesFetched >= maxPages) {
-      throw new Error(
-        `fetchAllRefunds exceeded its ${maxPages}-page subrequest cap while paginating "${path}" ` +
-          `(fetched ${pagesFetched} pages, more remain). Each page is a Cloudflare Workers subrequest ` +
-          `(limit 50 on Free, 1000 on paid), and the cap stays below that ceiling on purpose to leave ` +
-          `room for the non-pagination subrequests in the same request (the per-order date lookups in ` +
-          `step 3); raise maxPages or narrow the query.`
+      // Marked so it reaches the dispatcher's budget branch, like every other
+      // budget stop (the outer catch rethrows anything with err.code).
+      throw markSubrequestBudgetError(
+        new Error(
+          `fetchAllRefunds exceeded its ${maxPages}-page subrequest cap while paginating "${path}" ` +
+            `(fetched ${pagesFetched} pages, more remain). Each page is a Cloudflare Workers subrequest ` +
+            `(limit 50 on Free, 1000 on paid), and the cap stays below that ceiling on purpose to leave ` +
+            `room for the non-pagination subrequests in the same request (the per-order date lookups in ` +
+            `step 3); raise maxPages or narrow the query.`
+        ),
+        { subrequestCount: bc.subrequestCount || 0, attempt: 0 }
       );
     }
     const spent = bc.subrequestCount || 0;
     if (spent >= SUBREQUEST_SOFT_CAP) {
-      throw new Error(
-        `fetchAllRefunds stopped paginating "${path}" after ${pagesFetched} page(s): the shared ` +
-          `per-request subrequest budget is exhausted (${spent}/${SUBREQUEST_SOFT_CAP} soft cap, ` +
-          `Cloudflare Workers Free plan aborts at 50). This budget is shared across the whole tool ` +
-          `call — refund pagination and the per-order date lookups all count — so narrow the query or ` +
-          `split the work. A paid Workers plan raises the ceiling to 1000.`
+      throw markSubrequestBudgetError(
+        new Error(
+          `fetchAllRefunds stopped paginating "${path}" after ${pagesFetched} page(s): the shared ` +
+            `per-request subrequest budget is exhausted (${spent}/${SUBREQUEST_SOFT_CAP} soft cap, ` +
+            `Cloudflare Workers Free plan aborts at 50). This budget is shared across the whole tool ` +
+            `call — refund pagination and the per-order date lookups all count — so narrow the query or ` +
+            `split the work. A paid Workers plan raises the ceiling to 1000.`
+        ),
+        { subrequestCount: spent, attempt: 0 }
       );
     }
 
