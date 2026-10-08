@@ -31,3 +31,19 @@ preview_id = "fe97b62951cf4ffea7a2fcfda256c2a3"
 
 [observability]
 enabled = true
+
+# ---------------------------------------------------------------------------
+# New Arrivals daily sync (src/scheduled.js).
+# 15:00 UTC = 05:00 HST. The cron WRITES only when NEW_ARRIVALS_LIVE is exactly
+# "true"; anything else is a dry run that only logs one summary line.
+# NOTE: `wrangler deploy` resets [vars] to these values, so flipping
+# NEW_ARRIVALS_LIVE is a reviewed edit here plus a deploy.
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["0 15 * * *"]
+
+[vars]
+NEW_ARRIVALS_CATEGORY_ID = "114"                   # Featured > New (/featured/new)
+NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS = "113,83,84,85" # Last Call + Vault tree
+NEW_ARRIVALS_WINDOW_DAYS = "60"
+NEW_ARRIVALS_LIVE = "false"
