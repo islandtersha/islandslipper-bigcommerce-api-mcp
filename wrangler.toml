@@ -46,4 +46,4 @@ crons = ["0 15 * * *"]
 NEW_ARRIVALS_CATEGORY_ID = "114"                   # Featured > New (/featured/new)
 NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS = "113,83,84,85" # Last Call + Vault tree
 NEW_ARRIVALS_WINDOW_DAYS = "60"
-NEW_ARRIVALS_LIVE = "false"
+NEW_ARRIVALS_LIVE = "true"
