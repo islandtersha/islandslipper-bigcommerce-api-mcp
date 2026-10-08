@@ -18,7 +18,7 @@ is pasted once per client to approve it.
   Node process, no Claude Desktop stdio config).
 - Keep BigCommerce credentials in **Cloudflare Workers Secrets**, never in code.
 - Add store-operations tooling on top of the original read tools:
-  daily sales reporting and inventory read/write.
+  daily sales reporting, inventory read/write, and the New Arrivals sync.
 
 ## Tools
 
@@ -31,6 +31,120 @@ is pasted once per client to approve it.
 | `get_refunds_summary` | Refund activity over an HST date window: refund count/total, unique orders refunded, avg days from order to refund, breakdown by original-order month, and top-10 refunds. Input: `start_date` (required), optional `end_date` (defaults to today in HST). |
 | `get_inventory_levels` | Inventory for a list of `skus` (or a `product_id`), including variants. |
 | `update_inventory` | Set `inventory_level` for a batch of SKUs. Defaults to `dry_run=true`. Respects BigCommerce rate limits. |
+| `get_categories` | Full category tree with breadcrumb paths; optional product counts and hidden-category pruning. |
+| `audit_new_arrivals` | Read-only report of what the New Arrivals sync would do. See [New Arrivals sync](#new-arrivals-sync). |
+| `sync_new_arrivals` | Sync the New Arrivals category with the launch-date rule. Defaults to `dry_run=true`. |
+| `set_launch_date` | Set only the `~launch_date` custom field on up to 43 products. Defaults to `dry_run=true`. |
+
+## New Arrivals sync
+
+The homepage "New" section used BigCommerce's built-in New Products panel,
+which sorts by `date_created`. Splitting a legacy parent into one product per
+color creates new products, so years-old colors showed up as New. This job
+keeps category **114 (Featured > New, `/featured/new`)** in step with each
+product's real launch date instead.
+
+### The rule
+
+- **Effective launch date** = the `~launch_date` custom field (`YYYY-MM-DD`)
+  when it is present and valid; otherwise `date_created` as a Hawaii (HST)
+  calendar date. Surrounding spaces are trimmed; anything that isn't a real
+  `YYYY-MM-DD` date counts as missing and is flagged by the audit.
+- **New** = launched 0–59 days ago in HST (`NEW_ARRIVALS_WINDOW_DAYS`, default
+  60). A future date isn't new yet.
+- **Eligible** = visible, and not in any `NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS`
+  category (Last Call and the Vault tree).
+- **Category contents** = every eligible new product. If that's fewer than 4,
+  it's topped up with the most recently launched eligible products (never
+  future-dated ones).
+- **Order** = newest launch date first; ties go to the higher product ID.
+- When splitting a color off a parent, set `~launch_date` to the **original**
+  color's launch date (use `2020-01-01` for legacy styles with unknown dates).
+
+The rule lives in one place, [`src/lib/new-arrivals.js`](src/lib/new-arrivals.js),
+and is covered by `npm test`.
+
+### What the sync changes
+
+- Adds products to category 114, removes stale ones **from 114 only**, and sets
+  114's product sort order. A product's other categories are never touched.
+  Categories 115 and 116 are reported by the audit but never written.
+- Category 114's default sort must be **Featured** in BC admin, or the sort
+  order the sync sets won't control what shoppers see. The audit warns if it isn't.
+- Safety checks: before any delete, it reads the assignments with the exact same
+  filter and refuses unless they match. It refuses to run on an empty catalog
+  read or an empty target set. It checks the subrequest budget before the first
+  write. It reads the category back after a live run.
+- A day with no catalog changes sends no writes.
+
+### Settings (`[vars]` in `wrangler.toml`)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `NEW_ARRIVALS_CATEGORY_ID` | `114` | The category the sync manages. |
+| `NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS` | `113,83,84,85` | Never included: Last Call (113) and the Vault tree (83–85). |
+| `NEW_ARRIVALS_WINDOW_DAYS` | `60` | How many days a product counts as new. |
+| `NEW_ARRIVALS_LIVE` | `false` | The daily cron writes only when this is exactly `true`. |
+
+`wrangler deploy` resets these to the values in `wrangler.toml`, so change them
+there and redeploy. A dashboard edit would be overwritten on the next deploy.
+
+### Daily cron
+
+Runs at 15:00 UTC (5:00 AM HST) and calls the same sync. Unless
+`NEW_ARRIVALS_LIVE` is exactly `"true"` it runs as a dry run. Each run writes
+one line to Workers Logs, e.g.
+`new_arrivals_sync mode=live status=ok … added=1 removed=1 … writes=3 subrequests=7`.
+A failed run logs `status=error` and shows as failed in the Cloudflare dashboard.
+
+### Running it (in Claude, through the connector)
+
+1. **Audit:** `audit_new_arrivals`. This is read-only.
+2. **Set launch dates** where needed: `set_launch_date` with
+   `updates: [{ product_id, launch_date }]`. Check the dry run, then repeat with
+   `dry_run: false`.
+3. **Dry run:** `sync_new_arrivals`. It defaults to `dry_run: true` and shows the
+   exact add, remove, and sort-order requests.
+4. **Live run:** `sync_new_arrivals` with `dry_run: false`. Check `/featured/new`.
+5. **Turn on the daily cron:** set `NEW_ARRIVALS_LIVE = "true"` in
+   `wrangler.toml`, commit, and redeploy.
+
+New tools appear only after you **disconnect and reconnect** the connector in
+Claude; tool lists are read when the connector connects.
+
+### Rolling back
+
+1. Set `NEW_ARRIVALS_LIVE` to anything other than `"true"` (e.g. `"false"`) in
+   `wrangler.toml` and redeploy. The cron goes back to dry runs.
+2. If needed, empty category 114 (or restore its old products) in BC admin.
+
+`~launch_date` values written by `set_launch_date` can be edited or deleted
+on the product in BC admin.
+
+### PowerShell (Windows)
+
+```powershell
+# Deploy (from an up-to-date main)
+git checkout main
+git pull
+npx wrangler deploy
+
+# Confirm the deployed version and watch the cron's log line
+npx wrangler deployments list
+npx wrangler tail --format pretty
+
+# Run the cron locally as a dry run (NEW_ARRIVALS_LIVE is "false" in wrangler.toml)
+npx wrangler dev --test-scheduled
+# in a second PowerShell window:
+curl.exe "http://localhost:8787/__scheduled?cron=0+15+*+*+*"
+
+# Unit tests
+npm test
+```
+
+No new secrets are needed. The settings above are plain `[vars]`, and
+`set_launch_date` / `sync_new_arrivals` use the existing `BC_ACCESS_TOKEN`,
+which needs the **Products: modify** scope.
 
 ## Install & deploy
 
@@ -38,7 +152,8 @@ is pasted once per client to approve it.
 - [Node.js 18+](https://nodejs.org/) (to run Wrangler locally)
 - A [Cloudflare account](https://dash.cloudflare.com/sign-up) with Workers enabled
 - BigCommerce API credentials (Advanced Settings → API Accounts) with
-  **Products**, **Orders**, and **Customers** scopes (Modify for `update_inventory`)
+  **Products**, **Orders**, and **Customers** scopes (Products: modify for
+  `update_inventory`, `sync_new_arrivals`, and `set_launch_date`)
 
 ### 1. Clone and install
 ```sh
