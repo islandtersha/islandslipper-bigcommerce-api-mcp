@@ -14,6 +14,7 @@ import { apiTool as updateInventory } from "./update-inventory.js";
 import { apiTool as getCategories } from "./get-categories.js";
 import { apiTool as auditNewArrivals } from "./audit-new-arrivals.js";
 import { apiTool as syncNewArrivals } from "./sync-new-arrivals.js";
+import { apiTool as setLaunchDate } from "./set-launch-date.js";
 
 export const tools = [
   getAllProducts,
@@ -26,4 +27,5 @@ export const tools = [
   getCategories,
   auditNewArrivals,
   syncNewArrivals,
+  setLaunchDate,
 ];
