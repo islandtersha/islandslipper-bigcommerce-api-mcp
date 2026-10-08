@@ -19,14 +19,18 @@
  * OAuth client registrations and tokens are stored in the OAUTH_KV namespace
  * bound in wrangler.toml. The MCP_AUTH_TOKEN secret is the master key an
  * operator pastes at /authorize to approve a new client.
+ *
+ * The `scheduled` handler runs the daily New Arrivals sync (cron in
+ * wrangler.toml), which writes only when NEW_ARRIVALS_LIVE is "true".
  */
 
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 
 import { mcpApiHandler } from "./mcp-api-handler.js";
 import { defaultHandler } from "./auth-handler.js";
+import { runScheduledNewArrivalsSync } from "./scheduled.js";
 
-export default new OAuthProvider({
+const provider = new OAuthProvider({
   apiRoute: "/mcp",
   apiHandler: mcpApiHandler,
   defaultHandler,
@@ -35,3 +39,13 @@ export default new OAuthProvider({
   clientRegistrationEndpoint: "/register",
   scopesSupported: ["mcp"],
 });
+
+export default {
+  fetch(request, env, ctx) {
+    return provider.fetch(request, env, ctx);
+  },
+
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(runScheduledNewArrivalsSync(env));
+  },
+};
