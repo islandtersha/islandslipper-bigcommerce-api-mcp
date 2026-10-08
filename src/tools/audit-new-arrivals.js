@@ -12,6 +12,7 @@
 import { fetchAllPages } from "./catalog-helpers.js";
 import {
   computeNewArrivals,
+  exclusionReason,
   planCategorySync,
   readNewArrivalsConfig,
   todayHst,
@@ -70,14 +71,7 @@ const executeFunction = async ({ window_days, store_Hash } = {}, { bc, env }) =>
     const memberById = new Map(result.members.map((m) => [m.id, m]));
     const ev = (id) => result.evaluated.get(id);
 
-    const whyNot = (id) => {
-      if (memberById.has(id)) return null;
-      const e = ev(id);
-      if (e.ineligible) return e.ineligible;
-      if (e.status === "future") return `future launch date (${e.effective.date})`;
-      if (e.status === "no_date") return "no usable launch date or date_created";
-      return `outside the ${config.windowDays}-day window (${e.days} days) and not needed for top-up`;
-    };
+    const whyNot = (id) => exclusionReason(ev(id), memberById.has(id), config.windowDays);
 
     const basic = (p) => ({ id: p.id, name: p.name, sku: p.sku });
     const datedRow = (p) => {

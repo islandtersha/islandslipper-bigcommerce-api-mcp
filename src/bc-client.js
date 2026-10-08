@@ -137,6 +137,10 @@ export class BcClient {
   post(path, body, opts) {
     return this.request("POST", path, { ...opts, body });
   }
+
+  delete(path, opts) {
+    return this.request("DELETE", path, opts);
+  }
 }
 
 /** The err.code every subrequest-budget stop carries so mcp.js's dispatcher

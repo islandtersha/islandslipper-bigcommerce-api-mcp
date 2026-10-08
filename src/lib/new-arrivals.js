@@ -249,6 +249,18 @@ export function computeNewArrivals(
 }
 
 /**
+ * Why an evaluated product (an entry of computeNewArrivals(...).evaluated) is
+ * not in the target set, or null when it is a member.
+ */
+export function exclusionReason(entry, isMember, windowDays) {
+  if (isMember) return null;
+  if (entry.ineligible) return entry.ineligible;
+  if (entry.status === "future") return `future launch date (${entry.effective.date})`;
+  if (entry.status === "no_date") return "no usable launch date or date_created";
+  return `outside the ${windowDays}-day window (${entry.days} days) and not needed for top-up`;
+}
+
+/**
  * Diff the target set against a category's current membership.
  *
  * @param members    computeNewArrivals(...).members (already in display order)

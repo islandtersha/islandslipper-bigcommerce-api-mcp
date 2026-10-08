@@ -13,6 +13,7 @@ import { apiTool as getInventoryLevels } from "./get-inventory-levels.js";
 import { apiTool as updateInventory } from "./update-inventory.js";
 import { apiTool as getCategories } from "./get-categories.js";
 import { apiTool as auditNewArrivals } from "./audit-new-arrivals.js";
+import { apiTool as syncNewArrivals } from "./sync-new-arrivals.js";
 
 export const tools = [
   getAllProducts,
@@ -24,4 +25,5 @@ export const tools = [
   updateInventory,
   getCategories,
   auditNewArrivals,
+  syncNewArrivals,
 ];
