@@ -158,6 +158,42 @@ Use `npm run tail` (`wrangler tail`) to stream live logs from a deployed Worker.
   `X-Rate-Limit-Time-Reset-Ms` on `429` and backs off automatically;
   `update_inventory` writes sequentially.
 
+## Subrequest budget (tool authors)
+
+Cloudflare Workers cap **outbound subrequests per incoming request**. On the
+**Free plan** the hard ceiling is **50**; once a request crosses it the Worker
+aborts opaquely, mid-tool, with no usable error.
+
+The budget is **per REQUEST, not per helper**. Every `bc.get` / `bc.put` in a
+single `tools/call` draws from the same pool — a category-tree sweep, the
+SKU lookups, the write itself, and read-back verification all count
+together. A guard that only watches its own calls (e.g. `fetchAllPages`
+counting pages) can therefore report itself within limits while the request as
+a whole blows the ceiling.
+
+To keep this visible and fail cleanly:
+
+- The request-scoped `bc` client carries a shared `subrequestCount`, incremented
+  on every ACTUAL fetch — the first attempt **and each 429 retry** (a retry is a
+  real Cloudflare subrequest). When it reaches `SUBREQUEST_SOFT_CAP` (45, set
+  below 50 as margin against Cloudflare's opaque abort — not as an allowance for
+  uncounted retries), the next fetch throws a clear error naming the tool and the
+  count instead of letting Cloudflare abort. The error distinguishes the
+  pre-flight case (over-fetching → narrow the query) from exhaustion mid-retry
+  (the store is being throttled → back off), and carries
+  `code = "SUBREQUEST_BUDGET_EXHAUSTED"` so the dispatcher can report it
+  distinctly from a transient BigCommerce error.
+- `fetchAllPages` consults that shared counter in addition to its own `maxPages`
+  cap, so a sweep that runs after other subrequests stops early.
+
+**Any new tool that does a full-tree sweep AND per-item work must budget for
+both** — estimate `pages + per_item_calls × items + fixed overhead` against 45,
+and split the work across calls (or paginate more narrowly) if it won't fit.
+
+Upgrading to a **paid Workers plan raises the ceiling to 1000**; at that point
+`fetchAllPages`'s `maxPages` default can go back up and `SUBREQUEST_SOFT_CAP`
+can be raised accordingly.
+
 ## Upstream
 
 Forked from **[isaacgounton/bigcommerce-api-mcp](https://github.com/isaacgounton/bigcommerce-api-mcp)**.

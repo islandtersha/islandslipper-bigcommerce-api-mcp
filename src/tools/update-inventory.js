@@ -64,18 +64,37 @@ const executeFunction = async (
     // adjustments call and reported as individual errors (one bad SKU must not
     // fail the whole batch).
     const entries = updates.map(({ sku, new_inventory_level }) => {
-      const target = bySku.get(String(sku));
+      // Uppercase the lookup key: indexVariantsBySku keys by uppercased SKU
+      // (BC resolves sku:in case-insensitively). `resolved_sku` keeps the
+      // canonical STORED casing for the write below; results still echo the
+      // caller's original `sku`.
+      const target = bySku.get(String(sku).toUpperCase());
       const after = Number(new_inventory_level);
       return target
-        ? { sku, after, before: target.inventory_level, resolved: true }
+        ? {
+            sku,
+            resolved_sku: target.sku,
+            after,
+            before: target.inventory_level,
+            resolved: true,
+          }
         : { sku, after, before: null, resolved: false };
     });
 
-    // Dry run: no writes; report before/after for resolved SKUs.
+    // Dry run: no writes; report before/after for resolved SKUs. Include
+    // resolved_sku (the canonical stored casing the live run will actually
+    // write) — it's the one thing that differs from the input, so a dry run
+    // that hid it wouldn't show what the live run does.
     if (dry_run) {
       return entries.map((e) =>
         e.resolved
-          ? { sku: e.sku, before: e.before, after: e.after, status: "skipped_dry_run" }
+          ? {
+              sku: e.sku,
+              resolved_sku: e.resolved_sku,
+              before: e.before,
+              after: e.after,
+              status: "skipped_dry_run",
+            }
           : notFoundResult(e)
       );
     }
@@ -92,7 +111,10 @@ const executeFunction = async (
         const locationId = await resolveInventoryLocationId(bc, store_Hash);
         const items = resolved.map((e) => ({
           location_id: locationId,
-          sku: e.sku,
+          // Write the canonical stored SKU, not the caller's input casing — the
+          // adjustments endpoint would otherwise risk a silent no-op on a
+          // case-mismatched SKU. Falls back to the input if somehow absent.
+          sku: e.resolved_sku || e.sku,
           quantity: e.after,
         }));
         await bc.put(
@@ -101,6 +123,9 @@ const executeFunction = async (
           { storeHash: store_Hash }
         );
       } catch (err) {
+        // A marked error (e.code, e.g. subrequest-budget) propagates to the
+        // dispatcher rather than being flattened into a per-SKU error_message.
+        if (err && err.code) throw err;
         batchStatus = "error";
         batchError = err.message;
       }
@@ -108,11 +133,20 @@ const executeFunction = async (
 
     return entries.map((e) => {
       if (!e.resolved) return notFoundResult(e);
+      // resolved_sku echoes the canonical SKU actually sent to BC, consistent
+      // with the dry-run row; `sku` stays the caller's input for traceability.
       if (batchStatus === "updated") {
-        return { sku: e.sku, before: e.before, after: e.after, status: "updated" };
+        return {
+          sku: e.sku,
+          resolved_sku: e.resolved_sku,
+          before: e.before,
+          after: e.after,
+          status: "updated",
+        };
       }
       return {
         sku: e.sku,
+        resolved_sku: e.resolved_sku,
         before: e.before,
         after: e.after,
         status: "error",
@@ -120,6 +154,7 @@ const executeFunction = async (
       };
     });
   } catch (error) {
+    if (error && error.code) throw error;
     return {
       error: `An error occurred while updating inventory: ${error.message}`,
     };
@@ -143,7 +178,7 @@ const apiTool = {
     function: {
       name: "update_inventory",
       description:
-        "Set the absolute inventory level for a batch of BigCommerce SKUs via the Inventory Adjustments API (PUT /v3/inventory/adjustments/absolute). Resolves each SKU to its variant to report the current level and to flag unknown SKUs, then writes the whole batch in one call. Immune to the Catalog variant PUT's 'Sku is not unique' 409s. Defaults to dry_run=true (reports what would change without writing). The adjustments endpoint is asynchronous — a 'updated' status means BC accepted the change; verify the settled level out of band with get_inventory_levels. Returns one result per SKU with before/after levels and a status of 'updated', 'skipped_dry_run', or 'error'.",
+        "Set the absolute inventory level for a batch of BigCommerce SKUs via the Inventory Adjustments API (PUT /v3/inventory/adjustments/absolute). Resolves each SKU to its variant to report the current level and to flag unknown SKUs, then writes the whole batch in one call. SKU matching is case-insensitive; the write targets the canonical stored SKU (returned as resolved_sku) while each result echoes the SKU you passed as sku. Immune to the Catalog variant PUT's 'Sku is not unique' 409s. Defaults to dry_run=true (reports what would change without writing) — dry-run rows carry resolved_sku too, so they show exactly which SKU the live run will target. The adjustments endpoint is asynchronous — a 'updated' status means BC accepted the change; verify the settled level out of band with get_inventory_levels. Returns one result per SKU with { sku, resolved_sku (resolved SKUs only), before, after, status: 'updated'|'skipped_dry_run'|'error', error_message? }; an unknown SKU has status 'error' and no resolved_sku.",
       parameters: {
         type: "object",
         properties: {

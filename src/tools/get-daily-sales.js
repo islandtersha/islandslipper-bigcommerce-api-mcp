@@ -67,6 +67,7 @@ const executeFunction = async ({ date } = {}, { bc }) => {
       top_5_skus_by_revenue: topN(revenueBySku, 5, "revenue"),
     };
   } catch (error) {
+    if (error && error.code) throw error; // marked errors (e.g. budget) propagate
     return {
       error: `An error occurred while computing daily sales: ${error.message}`,
     };

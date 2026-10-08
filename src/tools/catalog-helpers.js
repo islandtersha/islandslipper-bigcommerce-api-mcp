@@ -1,6 +1,10 @@
 /**
- * Shared BigCommerce Catalog v3 helpers used by the inventory tools.
+ * Shared BigCommerce Catalog v3 helpers for the inventory tools (get/update
+ * inventory levels) and get_categories: SKU resolution, product fetches,
+ * pagination, and the category visibility computation.
  */
+
+import { SUBREQUEST_SOFT_CAP } from "../bc-client.js";
 
 /** BigCommerce caps `sku:in` URLs; chunk large SKU lists to stay safe. */
 const SKU_CHUNK_SIZE = 50;
@@ -19,6 +23,14 @@ const SKU_CHUNK_SIZE = 50;
  */
 export async function fetchProductsBySkus(bc, skus, storeHash) {
   const productIds = new Set();
+  // Exact-equality match: BigCommerce may return extra rows from `sku:in`
+  // (e.g. substring-ish matches), so only keep rows whose SKU equals one of the
+  // requested SKUs. Comparison is
+  // case-INSENSITIVE because BC's `sku:in` filter is — matching byte-for-byte
+  // here would reject a row BC deliberately returned for a differently-cased
+  // query (e.g. "pt202-whis-8" vs stored "PT202-WHIS-8"), a false negative.
+  // Only the comparison is normalized; returned product data keeps its casing.
+  const requested = new Set(skus.map((s) => String(s).toUpperCase()));
 
   for (const group of chunk(skus.map(String), SKU_CHUNK_SIZE)) {
     const csv = group.join(",");
@@ -29,7 +41,9 @@ export async function fetchProductsBySkus(bc, skus, storeHash) {
       { storeHash }
     );
     for (const v of variantData.data || []) {
-      if (v.product_id != null) productIds.add(v.product_id);
+      if (requested.has(String(v.sku).toUpperCase()) && v.product_id != null) {
+        productIds.add(v.product_id);
+      }
     }
 
     // Base SKUs of simple products (no variant options) don't appear in the
@@ -39,7 +53,9 @@ export async function fetchProductsBySkus(bc, skus, storeHash) {
       { storeHash }
     );
     for (const p of productData.data || []) {
-      if (p.id != null) productIds.add(p.id);
+      if (requested.has(String(p.sku).toUpperCase()) && p.id != null) {
+        productIds.add(p.id);
+      }
     }
   }
 
@@ -66,123 +82,47 @@ async function fetchProductsByIds(bc, ids, storeHash) {
   return products;
 }
 
-/** Fetch products (with variants) by product_id. Returns product objects. */
-export async function fetchProductsById(bc, productId, storeHash) {
+/**
+ * Fetch products (variants only, NO custom_fields) by a single product_id.
+ * Returns an array of product objects.
+ */
+export async function fetchProductsWithVariantsById(bc, productId, storeHash) {
   return fetchProductsByIds(bc, [productId], storeHash);
-}
-
-/**
- * Fetch FULL product records — variants AND custom_fields — for a list of
- * product IDs. The catalog write/category tools need custom_fields (e.g. the
- * `~origin_categories` provenance field) and `categories`, which the leaner
- * fetchProductsByIds (variants only) omits.
- */
-async function fetchFullProductsByIds(bc, ids, storeHash) {
-  const products = [];
-  for (const group of chunk(ids.map(String), SKU_CHUNK_SIZE)) {
-    const q = new URLSearchParams({
-      "id:in": group.join(","),
-      include: "variants,custom_fields",
-      limit: "250",
-    });
-    const data = await bc.get(`/v3/catalog/products?${q}`, { storeHash });
-    products.push(...(data.data || []));
-  }
-  return products;
-}
-
-/**
- * Find every product id whose base SKU OR one of its variant SKUs EXACTLY
- * equals `sku`. Uses exact equality (not the substring behaviour of some BC
- * endpoints) so resolution never grabs the wrong product. Returns an array of
- * distinct product ids (usually 0 or 1; more than 1 signals a duplicate SKU).
- */
-async function findProductIdsBySku(bc, sku, storeHash) {
-  const ids = new Set();
-  const params = new URLSearchParams({ "sku:in": sku, limit: "250" });
-
-  const variantData = await bc.get(`/v3/catalog/variants?${params}`, {
-    storeHash,
-  });
-  for (const v of variantData.data || []) {
-    if (String(v.sku) === sku && v.product_id != null) ids.add(v.product_id);
-  }
-
-  const productData = await bc.get(`/v3/catalog/products?${params}`, {
-    storeHash,
-  });
-  for (const p of productData.data || []) {
-    if (String(p.sku) === sku && p.id != null) ids.add(p.id);
-  }
-  return [...ids];
-}
-
-/**
- * resolveProduct — shared entry point for the catalog write tools.
- *
- * Accepts an identifier of { product_id } OR { sku } and returns the FULL
- * product record (variants, categories, custom_fields). Throws a clear Error
- * when the identifier is malformed, nothing matches, or — for a SKU — MORE
- * THAN ONE product matches: it lists every match rather than guessing which
- * one the caller meant.
- */
-export async function resolveProduct(bc, identifier, storeHash) {
-  const { product_id, sku } = identifier || {};
-  const hasId =
-    product_id !== undefined && product_id !== null && String(product_id) !== "";
-  const hasSku = sku !== undefined && sku !== null && String(sku).trim() !== "";
-
-  if (!hasId && !hasSku) {
-    throw new Error("identifier must include a `product_id` or a `sku`.");
-  }
-
-  let ids;
-  if (hasId) {
-    ids = [product_id];
-  } else {
-    ids = await findProductIdsBySku(bc, String(sku), storeHash);
-    if (ids.length === 0) {
-      throw new Error(`No product found with SKU "${sku}".`);
-    }
-    if (ids.length > 1) {
-      const matches = await fetchFullProductsByIds(bc, ids, storeHash);
-      const list = matches
-        .map((p) => `#${p.id} "${p.name}" (base SKU ${p.sku || "—"})`)
-        .join("; ");
-      throw new Error(
-        `SKU "${sku}" matches more than one product: ${list}. Disambiguate with product_id.`
-      );
-    }
-  }
-
-  const products = await fetchFullProductsByIds(bc, ids, storeHash);
-  if (products.length === 0) {
-    throw new Error(
-      hasId
-        ? `No product found with product_id ${product_id}.`
-        : `No product found with SKU "${sku}".`
-    );
-  }
-  return products[0];
 }
 
 /**
  * Build a Map of sku -> { product_id, variant_id, inventory_level, ... } from
  * a list of product objects, indexing every variant SKU and every product's
  * base SKU (falling back to the product's first variant).
+ *
+ * The map is KEYED BY UPPERCASED SKU because BigCommerce's `sku:in` resolves
+ * case-insensitively — a lookup for "pt202-whis-8" must find a product BC
+ * stored as "PT202-WHIS-8". Callers MUST uppercase their lookup key
+ * (`map.get(String(sku).toUpperCase())`). The row VALUES keep the original
+ * stored casing in `.sku`, so results and downstream writes use the canonical
+ * SKU, not the uppercased key.
  */
 export function indexVariantsBySku(products) {
   const map = new Map();
   for (const p of products) {
-    const variants = p.variants || [];
+    // A missing `variants` array means the caller fetched without
+    // include=variants; silently mapping nothing would hand the caller an empty
+    // result that looks like "SKU not found". Fail loudly instead.
+    if (!Array.isArray(p.variants)) {
+      throw new Error(
+        `Product #${p.id} was passed to indexVariantsBySku without a \`variants\` array; ` +
+          `fetch it with include=variants before indexing.`
+      );
+    }
+    const variants = p.variants;
     for (const v of variants) {
       if (v.sku) {
-        map.set(String(v.sku), variantRow(p, v));
+        map.set(String(v.sku).toUpperCase(), variantRow(p, v));
       }
     }
     // Map the product's base SKU to its default variant if not already mapped.
-    if (p.sku && !map.has(String(p.sku)) && variants.length > 0) {
-      map.set(String(p.sku), variantRow(p, variants[0]));
+    if (p.sku && !map.has(String(p.sku).toUpperCase()) && variants.length > 0) {
+      map.set(String(p.sku).toUpperCase(), variantRow(p, variants[0]));
     }
   }
   return map;
@@ -210,8 +150,20 @@ function variantRow(product, variant) {
  * instead it verifies on every call and throws if the store has zero or more
  * than one location, so a misconfigured / multi-location store surfaces loudly
  * rather than silently writing inventory to the wrong warehouse.
+ *
+ * Memoized per Worker invocation: the result is cached on the request-scoped
+ * `bc` client (keyed by storeHash, since bc.get accepts a storeHash override),
+ * so repeated adjustments in one update_inventory call cost a single
+ * `GET /v3/inventory/locations` subrequest instead of one per SKU. A fresh bc
+ * is built per tool call (see mcp.js), so the cache never outlives the request
+ * — preferred over a module-level (per-isolate) cache, which would persist
+ * across unrelated requests and could serve a stale single-location id after a
+ * store added a second location, silently bypassing the multi-location throw.
  */
 export async function resolveInventoryLocationId(bc, storeHash) {
+  const cache = (bc._inventoryLocationIdCache ||= new Map());
+  if (cache.has(storeHash)) return cache.get(storeHash);
+
   const data = await bc.get("/v3/inventory/locations", { storeHash });
   const locations = data.data || [];
   if (locations.length === 0) {
@@ -227,7 +179,9 @@ export async function resolveInventoryLocationId(bc, storeHash) {
       `Multiple inventory locations found (${list}); update_inventory needs a single target location — pick one before writing.`
     );
   }
-  return locations[0].id;
+  const id = locations[0].id;
+  cache.set(storeHash, id);
+  return id;
 }
 
 /**
@@ -247,6 +201,11 @@ export async function resolveInventoryLocationId(bc, storeHash) {
  * count. If a chain exceeds the cap (only possible with a cycle or a broken
  * parent pointer), the node is treated as NOT visible and its id is logged,
  * so a bad BC tree fails safe instead of hanging the Worker.
+ *
+ * Broken parent pointer: because `byId` is the FULL tree, a node whose
+ * parent_id is absent from it means the tree is broken — not that the node is a
+ * root. Such a node fails CLOSED (NOT visible) and is logged, matching the
+ * cycle-cap direction; every failure mode here fails the same way.
  */
 export function computeEffectiveVisibility(byId) {
   const effective = new Map();
@@ -264,7 +223,18 @@ export function computeEffectiveVisibility(byId) {
 
     for (;;) {
       if (!cur) {
-        base = true; // missing parent → treat the chain top as a root
+        // A node names a parent_id that isn't in the FULL tree — broken BC
+        // data. Fail CLOSED (not visible), same direction as the cycle cap,
+        // rather than treating the dangling node as a reachable root.
+        const child = chain[chain.length - 1];
+        console.log(
+          `computeEffectiveVisibility: category ${
+            child ? child.id : id
+          } references missing parent_id ${
+            child ? child.parent_id : "(unknown)"
+          }; treating as not visible (broken tree).`
+        );
+        base = false;
         break;
       }
       if (effective.has(cur.id)) {
@@ -320,15 +290,21 @@ export function chunk(arr, size) {
  * Subrequest guard: each page is one Cloudflare Workers subrequest, and the
  * Worker aborts opaquely once the platform's per-request subrequest limit is
  * hit (50 on the Free plan, 1000 on paid). To fail loudly and early instead,
- * a single sweep throws a clear error if it would exceed `maxPages` (default
- * 40 — safely under the Free-plan ceiling). Raise `maxPages` on a paid plan,
- * or narrow the query, if a legitimate sweep needs more pages.
+ * a sweep is bounded TWO ways:
+ *   - its own `maxPages` (default 30) — a sanity cap on a single pagination run;
+ *   - the SHARED per-request subrequest counter on the `bc` client, so a sweep
+ *     that runs AFTER other subrequests (lookups, a write, read-back
+ *     verification) stops before the whole tool call blows the ceiling, even
+ *     when its own page count is well under maxPages.
+ * The shared counter is the real ceiling; `maxPages` just keeps one runaway
+ * sweep from claiming the entire budget. Raise `maxPages` on a paid plan, or
+ * narrow the query, if a legitimate sweep needs more pages.
  */
 export async function fetchAllPages(
   bc,
   path,
   storeHash,
-  { limit = 250, maxPages = 40 } = {}
+  { limit = 250, maxPages = 30 } = {}
 ) {
   const results = [];
   let page = 1;
@@ -338,7 +314,23 @@ export async function fetchAllPages(
       throw new Error(
         `fetchAllPages exceeded its ${maxPages}-page subrequest cap while paginating "${path}" ` +
           `(fetched ${pagesFetched} pages, more remain). Each page is a Cloudflare Workers subrequest ` +
-          `(limit 50 on Free, 1000 on paid); raise maxPages or narrow the query.`
+          `(limit 50 on Free, 1000 on paid), and the cap stays below that ceiling on purpose to leave ` +
+          `room for the non-pagination subrequests in the same request (SKU lookups, writes, and ` +
+          `read-back verification); raise maxPages or narrow the query.`
+      );
+    }
+
+    // Consult the SHARED per-request budget, not just our own page count: other
+    // subrequests in this tool call have already drawn from the same 50-request
+    // pool. Stop before the next page would tip the whole request over.
+    const spent = bc.subrequestCount || 0;
+    if (spent >= SUBREQUEST_SOFT_CAP) {
+      throw new Error(
+        `fetchAllPages stopped paginating "${path}" after ${pagesFetched} page(s): the shared ` +
+          `per-request subrequest budget is exhausted (${spent}/${SUBREQUEST_SOFT_CAP} soft cap, ` +
+          `Cloudflare Workers Free plan aborts at 50). This budget is shared across the whole tool ` +
+          `call — lookups, writes, and read-back verification all count — so narrow the query or split ` +
+          `the work. A paid Workers plan raises the ceiling to 1000.`
       );
     }
 

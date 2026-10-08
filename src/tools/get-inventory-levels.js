@@ -3,12 +3,18 @@
  * via the BigCommerce Catalog Products API v3, including variants.
  */
 
-import { fetchProductsBySkus, fetchProductsById } from "./catalog-helpers.js";
+import {
+  fetchProductsBySkus,
+  fetchProductsWithVariantsById,
+} from "./catalog-helpers.js";
 
 const executeFunction = async ({ skus, product_id, store_Hash } = {}, { bc }) => {
   try {
     const hasSkus = Array.isArray(skus) && skus.length > 0;
-    if (!hasSkus && product_id === undefined) {
+    // Treat product_id: null the same as undefined — otherwise null slips past
+    // the guard and builds an `id:in=null` query that silently returns nothing.
+    const hasProductId = product_id !== undefined && product_id !== null;
+    if (!hasSkus && !hasProductId) {
       return {
         error:
           "Provide either a non-empty `skus` array or a `product_id`.",
@@ -19,19 +25,60 @@ const executeFunction = async ({ skus, product_id, store_Hash } = {}, { bc }) =>
     if (hasSkus) {
       products = await fetchProductsBySkus(bc, skus, store_Hash);
     } else {
-      products = await fetchProductsById(bc, product_id, store_Hash);
+      products = await fetchProductsWithVariantsById(bc, product_id, store_Hash);
     }
 
     const rows = flattenRows(products);
 
     // When filtering by SKU, only return the requested SKUs (a product may
-    // carry sibling variants we didn't ask about).
+    // carry sibling variants we didn't ask about). Compare case-INSENSITIVELY
+    // to match fetchProductsBySkus — BigCommerce's sku:in is case-insensitive,
+    // so a lowercase query resolves an uppercase-stored SKU, and a byte-exact filter here would drop every resolved row and
+    // falsely report the SKU as missing. Returned rows keep their stored casing.
     if (hasSkus) {
-      const wanted = new Set(skus.map(String));
-      return rows.filter((r) => wanted.has(String(r.sku)));
+      const wanted = new Set(skus.map((s) => String(s).toUpperCase()));
+      const matched = rows.filter((r) =>
+        wanted.has(String(r.sku).toUpperCase())
+      );
+
+      // Every base + variant SKU across the RESOLVED products (uppercased). A
+      // requested SKU present here resolved to a product; absent, it did not.
+      // This distinguishes a SKU that resolved but produced no inventory row
+      // (e.g. a base SKU whose product exposes only variant-level rows) from one
+      // that isn't in the catalog at all — the same outward "missing" but
+      // different meanings mid-migration.
+      const resolvedSkus = new Set();
+      for (const p of products) {
+        if (p.sku) resolvedSkus.add(String(p.sku).toUpperCase());
+        for (const v of p.variants || []) {
+          if (v.sku) resolvedSkus.add(String(v.sku).toUpperCase());
+        }
+      }
+
+      // Requested SKUs that produced no row, each tagged with WHY. Original
+      // casing, de-duplicated in first-seen order.
+      const present = new Set(matched.map((r) => String(r.sku).toUpperCase()));
+      const missing_skus = [];
+      const seen = new Set();
+      for (const s of skus) {
+        const key = String(s).toUpperCase();
+        if (present.has(key) || seen.has(key)) continue;
+        seen.add(key);
+        missing_skus.push({
+          sku: s,
+          reason: resolvedSkus.has(key) ? "no_inventory_row" : "not_in_catalog",
+        });
+      }
+
+      // Unconditional shape: always { rows, missing_skus } so a chained caller
+      // never has to branch on Array.isArray(result). missing_skus is [] when
+      // everything matched.
+      return { rows: matched, missing_skus };
     }
-    return rows;
+    // product_id lookup: no requested SKUs, so nothing can be "missing".
+    return { rows, missing_skus: [] };
   } catch (error) {
+    if (error && error.code) throw error; // marked errors (e.g. budget) propagate
     return {
       error: `An error occurred while getting inventory levels: ${error.message}`,
     };
@@ -76,7 +123,7 @@ const apiTool = {
     function: {
       name: "get_inventory_levels",
       description:
-        "Get inventory levels for BigCommerce products/variants. Provide an array of SKUs, or alternatively a single product_id. Returns one row per matching variant with sku, product_id, variant_id, inventory_level, inventory_warning_level, product_name, and is_visible.",
+        "Get inventory levels for BigCommerce products/variants. Provide an array of SKUs, or alternatively a single product_id. SKU matching is case-insensitive; returned rows keep BigCommerce's stored casing. ALWAYS returns { rows: [...], missing_skus: [...] } (one consistent shape — no bare-array case). Each row has sku, product_id, variant_id, inventory_level, inventory_warning_level, product_name, and is_visible. missing_skus lists every requested SKU that produced no row, each as { sku, reason } where reason is 'not_in_catalog' (the SKU resolved to no product) or 'no_inventory_row' (it resolved to a product but yielded no matching inventory row, e.g. a base SKU whose product exposes only variant-level rows); missing_skus is [] when everything matched and always [] for a product_id lookup.",
       parameters: {
         type: "object",
         properties: {

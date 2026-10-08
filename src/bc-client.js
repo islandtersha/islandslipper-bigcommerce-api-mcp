@@ -8,6 +8,19 @@
 const BASE_URL = "https://api.bigcommerce.com/stores";
 
 /**
+ * Cloudflare Workers cap outbound subrequests per incoming request: 50 on the
+ * Free plan, 1000 on paid. This budget is shared across the WHOLE tool call —
+ * pagination, SKU lookups, writes, and read-back verification all draw
+ * from the same pool. We throw our own clear error at a soft cap safely below
+ * 50 so it wins the race against Cloudflare's opaque abort at the ceiling. The
+ * counter is incremented per ACTUAL fetch — 429 retries included — so the cap
+ * reflects real Cloudflare subrequest usage even under throttling; the gap
+ * below 50 is margin against that opaque abort, not an allowance for uncounted
+ * retries.
+ */
+export const SUBREQUEST_SOFT_CAP = 45;
+
+/**
  * Build a BigCommerce client from the Worker env bindings.
  * @param {Record<string, string>} env
  * @returns {BcClient}
@@ -27,6 +40,12 @@ export class BcClient {
   constructor(storeHash, token) {
     this.storeHash = storeHash;
     this.token = token;
+    // Per-request (per-isolate-invocation) subrequest budget. This client is
+    // built fresh for every tool call (see mcp.js), so the count is naturally
+    // scoped to one incoming request. `toolName` is stamped by the dispatcher
+    // so the budget error can name the offending tool.
+    this.subrequestCount = 0;
+    this.toolName = null;
   }
 
   #headers() {
@@ -53,6 +72,16 @@ export class BcClient {
     let attempt = 0;
 
     for (;;) {
+      // Shared per-request subrequest budget (see SUBREQUEST_SOFT_CAP). Guard at
+      // the TOP of the loop so every actual fetch — first attempt AND each 429
+      // retry — is counted before it is issued. This throws a returnable error
+      // before the Worker hits the hard ceiling and aborts opaquely, and stays
+      // accurate under a 429 storm (each retry is a real subrequest).
+      if (this.subrequestCount >= SUBREQUEST_SOFT_CAP) {
+        throw subrequestBudgetError(this.toolName, this.subrequestCount, attempt);
+      }
+      this.subrequestCount++;
+
       const response = await fetch(url, {
         method,
         headers: this.#headers(),
@@ -108,6 +137,72 @@ export class BcClient {
   post(path, body, opts) {
     return this.request("POST", path, { ...opts, body });
   }
+}
+
+/** The err.code every subrequest-budget stop carries so mcp.js's dispatcher
+ * (and tool catches) can tell it from a transient BigCommerce error — they need
+ * opposite responses. */
+export const SUBREQUEST_BUDGET_EXHAUSTED = "SUBREQUEST_BUDGET_EXHAUSTED";
+
+/**
+ * Why a budget stop fired — lets the dispatcher say the correct reason instead
+ * of assuming the shared counter hit the ceiling (it hasn't, for a page cap or a
+ * pre-flight projection). `subrequestCount` is only "at the ceiling" for
+ * BUDGET_SPENT; for the others it's informational (subrequests spent so far).
+ */
+export const BudgetStopReason = {
+  BUDGET_SPENT: "budget_spent", // shared counter reached SUBREQUEST_SOFT_CAP
+  PAGE_CAP: "page_cap", // a single paginated sweep hit its own page cap
+  PROJECTED_OVER_BUDGET: "projected_over_budget", // known upcoming work won't fit
+};
+
+/**
+ * Stamp the shared budget-exhaustion marker onto an Error so tools that build
+ * their OWN budget-refusal message (e.g. get_refunds_summary's step-3
+ * pre-flight) still reach the dispatcher's budget branch. Single source of the
+ * marker shape (code + reason + subrequestCount + attempt).
+ */
+export function markSubrequestBudgetError(
+  err,
+  { reason, subrequestCount, attempt } = {}
+) {
+  err.code = SUBREQUEST_BUDGET_EXHAUSTED;
+  err.reason = reason;
+  err.subrequestCount = subrequestCount;
+  err.attempt = attempt;
+  return err;
+}
+
+/**
+ * Build the shared-subrequest-budget error. `attempt` is the number of 429
+ * retries already performed in this request() call: 0 means the cap was hit
+ * pre-flight (the tool is over-fetching — narrow the query), > 0 means it was
+ * hit while retrying a rate-limited request (the store is being throttled —
+ * back off). The retry case can ALSO be an over-fetch (a tool that spent most
+ * of the budget before catching one 429 has both problems), so its message
+ * carries the subrequest count and says to narrow too when that count is high.
+ */
+function subrequestBudgetError(toolName, count, attempt) {
+  const who = toolName || "unknown";
+  const msg =
+    attempt > 0
+      ? `Subrequest budget exhausted while RETRYING a rate-limited (429) request: tool "${who}" ` +
+        `reached the soft cap of ${SUBREQUEST_SOFT_CAP} BigCommerce subrequests (Cloudflare Workers ` +
+        `Free plan aborts at 50) on retry attempt ${attempt}, after ${count} subrequests. Each 429 ` +
+        `retry is itself a counted subrequest, so back off and retry later. AND — because ${count} of ` +
+        `${SUBREQUEST_SOFT_CAP} subrequests were already spent before this 429 — if that count is high ` +
+        `the call is also over-fetching and should be narrowed, not just retried (a low count means it ` +
+        `is mostly throttling). A paid Workers plan raises the ceiling to 1000.`
+      : `Subrequest budget exhausted: tool "${who}" reached the soft cap of ${SUBREQUEST_SOFT_CAP} ` +
+        `BigCommerce subrequests in a single request (Cloudflare Workers Free plan aborts at 50; ` +
+        `${count} subrequests, attempt ${attempt}). The budget is shared across the whole tool call — ` +
+        `pagination, lookups, the write, read-back verification, and 429 retries all draw from it — so ` +
+        `narrow the query or split the work across calls. A paid Workers plan raises the ceiling to 1000.`;
+  return markSubrequestBudgetError(new Error(msg), {
+    reason: BudgetStopReason.BUDGET_SPENT,
+    subrequestCount: count,
+    attempt,
+  });
 }
 
 /** Convert a 429 response's headers into a delay in milliseconds. */

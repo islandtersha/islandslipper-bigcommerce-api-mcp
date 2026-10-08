@@ -8,7 +8,12 @@
  */
 
 import { tools } from "./tools/index.js";
-import { createBcClient } from "./bc-client.js";
+import {
+  createBcClient,
+  SUBREQUEST_BUDGET_EXHAUSTED,
+  SUBREQUEST_SOFT_CAP,
+  BudgetStopReason,
+} from "./bc-client.js";
 
 export const SERVER_NAME = "islandslipper-bc-mcp";
 export const SERVER_VERSION = "2.0.0";
@@ -72,7 +77,23 @@ async function callTool(id, params, env) {
     return errorResponse(id, -32602, `Unknown tool: ${toolName}`);
   }
 
-  const args = params.arguments || {};
+  // `arguments` may be omitted (→ {}), but if present it must be a plain object.
+  // A string or array would otherwise reach the tool, destructure to undefined,
+  // and trip each tool's own validation with a confusing message.
+  const rawArgs = params?.arguments;
+  if (
+    rawArgs !== undefined &&
+    rawArgs !== null &&
+    (typeof rawArgs !== "object" || Array.isArray(rawArgs))
+  ) {
+    return errorResponse(
+      id,
+      -32602,
+      "`arguments` must be an object mapping parameter names to values."
+    );
+  }
+
+  const args = rawArgs || {};
   const required = tool.definition.function.parameters?.required || [];
   for (const key of required) {
     if (!(key in args)) {
@@ -83,6 +104,7 @@ async function callTool(id, params, env) {
   let bc;
   try {
     bc = createBcClient(env);
+    bc.toolName = toolName; // so the shared subrequest-budget error can name it
   } catch (e) {
     return toolErrorResult(id, e.message);
   }
@@ -99,6 +121,35 @@ async function callTool(id, params, env) {
       content: [{ type: "text", text: formatResult(result) }],
     });
   } catch (e) {
+    // A subrequest-budget exhaustion needs the opposite response to a transient
+    // BigCommerce error (stop and narrow / back off, vs retry). Label it
+    // distinctly and warn that any write issued earlier in THIS call may already
+    // have landed — the counter is per-request, so the ceiling can be hit after
+    // a successful PUT — so the caller must verify before retrying.
+    if (e && e.code === SUBREQUEST_BUDGET_EXHAUSTED) {
+      // Say WHY it stopped from e.reason — the count is only "at the ceiling"
+      // for BUDGET_SPENT; a page cap or a pre-flight projection stops for a
+      // different reason and asserting the count there would misrepresent it.
+      const why =
+        {
+          [BudgetStopReason.BUDGET_SPENT]: `reached the shared subrequest soft cap (${e.subrequestCount}/${SUBREQUEST_SOFT_CAP}) and was stopped before Cloudflare's hard ceiling of 50`,
+          [BudgetStopReason.PAGE_CAP]: `hit a single-sweep pagination page cap before finishing (too many pages for one paginated call)`,
+          [BudgetStopReason.PROJECTED_OVER_BUDGET]: `was refused before starting because the work it still needs would exceed the remaining shared subrequest budget`,
+        }[e.reason] || `was stopped by its shared subrequest-budget guard`;
+      return okResponse(id, {
+        content: [
+          {
+            type: "text",
+            text:
+              `Subrequest budget error (${e.code}): tool "${toolName}" ${why}. This is NOT a ` +
+              `transient error — do not blindly retry. Any write issued earlier in this call MAY ` +
+              `already have been applied; verify current state before retrying, and narrow the query ` +
+              `or split the work (or back off if a 429 storm caused it). Details: ${e.message}`,
+          },
+        ],
+        isError: true,
+      });
+    }
     return okResponse(id, {
       content: [{ type: "text", text: `Error: ${e.message}` }],
       isError: true,
@@ -114,6 +165,11 @@ function formatResult(result) {
     }
     if (Array.isArray(result.data)) {
       return `Found ${result.data.length} items:\n${JSON.stringify(result, null, 2)}`;
+    }
+    // { rows, ... } shapes (e.g. get_inventory_levels) — count the rows and
+    // still print the whole object so sibling fields (missing_skus) show.
+    if (Array.isArray(result.rows)) {
+      return `Found ${result.rows.length} items:\n${JSON.stringify(result, null, 2)}`;
     }
     return JSON.stringify(result, null, 2);
   }

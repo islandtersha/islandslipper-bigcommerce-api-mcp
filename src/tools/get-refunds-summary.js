@@ -7,7 +7,19 @@
  * Uses the BigCommerce Refunds API (v3), paginates all records, and filters
  * locally by each refund's `created` timestamp — robust regardless of which
  * server-side date filters the endpoint supports.
+ *
+ * This is the repo's heaviest subrequest consumer: it paginates ALL refund
+ * history (cost grows with total refund volume, not window size) and then spends
+ * one subrequest per unique order in the window. Both stages are bounded against
+ * the shared Cloudflare Free-plan budget (see SUBREQUEST_SOFT_CAP) so it fails
+ * loudly instead of aborting opaquely or returning a partial summary.
  */
+
+import {
+  SUBREQUEST_SOFT_CAP,
+  markSubrequestBudgetError,
+  BudgetStopReason,
+} from "../bc-client.js";
 
 const HST_OFFSET = "-10:00";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -60,12 +72,43 @@ const executeFunction = async ({ start_date, end_date } = {}, { bc }) => {
     // 3. Look up each referenced order's date_created (one fetch per unique
     //    order, limited concurrency).
     const orderIds = [...new Set(inWindow.map((r) => r.order_id))];
+
+    // Budget pre-flight: step 3 spends one subrequest per unique order, on top
+    // of whatever pagination already spent. If they won't all fit in the shared
+    // budget, refuse BEFORE starting — a half-populated orderDateById would
+    // yield a summary computed from incomplete data and report it as success.
+    const spent = bc.subrequestCount || 0;
+    const remaining = SUBREQUEST_SOFT_CAP - spent;
+    if (orderIds.length > remaining) {
+      // A budget stop, not a generic failure — throw it MARKED so the outer
+      // catch rethrows it (it rethrows anything with err.code) and mcp.js's
+      // budget branch labels it "narrow the query", not "something broke".
+      throw markSubrequestBudgetError(
+        new Error(
+          `Refund window ${start_date}..${endDate} references ${orderIds.length} unique orders ` +
+            `needing a date lookup, but only ${remaining} subrequest(s) remain in this request's shared ` +
+            `budget (${spent}/${SUBREQUEST_SOFT_CAP} already spent; Cloudflare Free plan aborts at 50). ` +
+            `Refusing to start rather than return a summary computed from partially-loaded order ` +
+            `dates — narrow the date range and retry.`
+        ),
+        {
+          reason: BudgetStopReason.PROJECTED_OVER_BUDGET,
+          subrequestCount: spent,
+          attempt: 0,
+        }
+      );
+    }
+
     const orderDateById = new Map();
     await mapWithConcurrency(orderIds, 4, async (orderId) => {
       try {
         const order = await bc.get(`/v2/orders/${orderId}`);
         orderDateById.set(orderId, parseTimeMs(order?.date_created));
-      } catch {
+      } catch (e) {
+        // A marked error (e.code, e.g. subrequest-budget) must NOT be swallowed
+        // into a null date — rethrow so the dispatcher handles it. A per-order
+        // fetch failure otherwise degrades to an unknown date, as before.
+        if (e && e.code) throw e;
         orderDateById.set(orderId, null);
       }
     });
@@ -125,6 +168,7 @@ const executeFunction = async ({ start_date, end_date } = {}, { bc }) => {
       top_10_refunded_orders: topRefunds,
     };
   } catch (error) {
+    if (error && error.code) throw error; // marked errors (e.g. budget) propagate
     return {
       error: `An error occurred while summarizing refunds: ${error.message}`,
     };
@@ -134,13 +178,56 @@ const executeFunction = async ({ start_date, end_date } = {}, { bc }) => {
 async function fetchAllRefunds(bc) {
   const refunds = [];
   const limit = 250;
+  const maxPages = 30;
+  const path = "/v3/orders/payment_actions/refunds";
   let page = 1;
+  let pagesFetched = 0;
   for (;;) {
+    // Same two bounds fetchAllPages applies, hand-rolled here because this
+    // endpoint's pagination is terminated on a short page (robust whether or not
+    // it returns meta.pagination) rather than via fetchAllPages.
+    if (pagesFetched >= maxPages) {
+      // Marked so it reaches the dispatcher's budget branch, like every other
+      // budget stop (the outer catch rethrows anything with err.code).
+      throw markSubrequestBudgetError(
+        new Error(
+          `fetchAllRefunds exceeded its ${maxPages}-page subrequest cap while paginating "${path}" ` +
+            `(fetched ${pagesFetched} pages, more remain). Each page is a Cloudflare Workers subrequest ` +
+            `(limit 50 on Free, 1000 on paid), and the cap stays below that ceiling on purpose to leave ` +
+            `room for the non-pagination subrequests in the same request (the per-order date lookups in ` +
+            `step 3); raise maxPages or narrow the query.`
+        ),
+        {
+          reason: BudgetStopReason.PAGE_CAP,
+          subrequestCount: bc.subrequestCount || 0,
+          attempt: 0,
+        }
+      );
+    }
+    const spent = bc.subrequestCount || 0;
+    if (spent >= SUBREQUEST_SOFT_CAP) {
+      throw markSubrequestBudgetError(
+        new Error(
+          `fetchAllRefunds stopped paginating "${path}" after ${pagesFetched} page(s): the shared ` +
+            `per-request subrequest budget is exhausted (${spent}/${SUBREQUEST_SOFT_CAP} soft cap, ` +
+            `Cloudflare Workers Free plan aborts at 50). This budget is shared across the whole tool ` +
+            `call — refund pagination and the per-order date lookups all count — so narrow the query or ` +
+            `split the work. A paid Workers plan raises the ceiling to 1000.`
+        ),
+        {
+          reason: BudgetStopReason.BUDGET_SPENT,
+          subrequestCount: spent,
+          attempt: 0,
+        }
+      );
+    }
+
     const q = new URLSearchParams({
       limit: String(limit),
       page: String(page),
     });
-    const data = await bc.get(`/v3/orders/payment_actions/refunds?${q}`);
+    const data = await bc.get(`${path}?${q}`);
+    pagesFetched++;
     const batch = Array.isArray(data) ? data : data.data || [];
     if (batch.length === 0) break;
     refunds.push(...batch);
