@@ -1,9 +1,7 @@
 /**
- * Shared BigCommerce Catalog v3 helpers — the common spine for both the
- * inventory tools (get/update inventory levels) and the catalog write tools
- * (update_product, and the upcoming assign_categories / set_visibility):
- * product/SKU resolution, full-record fetches, pagination, and the category
- * visibility computation.
+ * Shared BigCommerce Catalog v3 helpers for the inventory tools (get/update
+ * inventory levels) and get_categories: SKU resolution, product fetches,
+ * pagination, and the category visibility computation.
  */
 
 import { SUBREQUEST_SOFT_CAP } from "../bc-client.js";
@@ -25,9 +23,9 @@ const SKU_CHUNK_SIZE = 50;
  */
 export async function fetchProductsBySkus(bc, skus, storeHash) {
   const productIds = new Set();
-  // Match the exact-equality behaviour of findProductIdsBySku: BigCommerce may
-  // return extra rows from `sku:in` (e.g. substring-ish matches), so only keep
-  // rows whose SKU equals one of the requested SKUs. Comparison is
+  // Exact-equality match: BigCommerce may return extra rows from `sku:in`
+  // (e.g. substring-ish matches), so only keep rows whose SKU equals one of the
+  // requested SKUs. Comparison is
   // case-INSENSITIVE because BC's `sku:in` filter is — matching byte-for-byte
   // here would reject a row BC deliberately returned for a differently-cased
   // query (e.g. "pt202-whis-8" vs stored "PT202-WHIS-8"), a false negative.
@@ -86,137 +84,10 @@ async function fetchProductsByIds(bc, ids, storeHash) {
 
 /**
  * Fetch products (variants only, NO custom_fields) by a single product_id.
- * Returns an array of product objects. Named to be unmistakable from
- * fetchFullProductsByIds (variants AND custom_fields) so a caller needing the
- * fuller record can't quietly import this leaner one.
+ * Returns an array of product objects.
  */
 export async function fetchProductsWithVariantsById(bc, productId, storeHash) {
   return fetchProductsByIds(bc, [productId], storeHash);
-}
-
-/**
- * Fetch FULL product records — variants AND custom_fields — for a list of
- * product IDs. The catalog write/category tools need custom_fields (e.g. the
- * `~origin_categories` provenance field) and `categories`, which the leaner
- * fetchProductsByIds (variants only) omits.
- *
- * Exported for genuine multi-id callers — update_product's read-back
- * verification and the upcoming assign_categories / set_visibility tools — plus
- * the duplicate-SKU error path below, which is legitimately multi-id.
- */
-export async function fetchFullProductsByIds(bc, ids, storeHash) {
-  const products = [];
-  for (const group of chunk(ids.map(String), SKU_CHUNK_SIZE)) {
-    const q = new URLSearchParams({
-      "id:in": group.join(","),
-      include: "variants,custom_fields",
-      limit: "250",
-    });
-    const data = await bc.get(`/v3/catalog/products?${q}`, { storeHash });
-    products.push(...(data.data || []));
-  }
-  return products;
-}
-
-/**
- * Find every product id whose base SKU OR one of its variant SKUs equals
- * `sku`. Uses exact equality (not the substring behaviour of some BC
- * endpoints) so resolution never grabs the wrong product — but case-
- * INSENSITIVELY, matching BC's own `sku:in` filter, so a differently-cased
- * lookup isn't rejected after BC returned the row. Returns an array of distinct
- * product ids (usually 0 or 1; more than 1 signals a duplicate SKU).
- */
-async function findProductIdsBySku(bc, sku, storeHash) {
-  const ids = new Set();
-  const target = String(sku).toUpperCase();
-  const params = new URLSearchParams({ "sku:in": sku, limit: "250" });
-
-  const variantData = await bc.get(`/v3/catalog/variants?${params}`, {
-    storeHash,
-  });
-  for (const v of variantData.data || []) {
-    if (String(v.sku).toUpperCase() === target && v.product_id != null) {
-      ids.add(v.product_id);
-    }
-  }
-
-  const productData = await bc.get(`/v3/catalog/products?${params}`, {
-    storeHash,
-  });
-  for (const p of productData.data || []) {
-    if (String(p.sku).toUpperCase() === target && p.id != null) ids.add(p.id);
-  }
-  return [...ids];
-}
-
-/**
- * resolveProduct — shared entry point for the catalog write tools.
- *
- * Accepts an identifier of { product_id } OR { sku } and returns the FULL
- * product record (variants, categories, custom_fields). Throws a clear Error
- * when the identifier is malformed, nothing matches, or — for a SKU — MORE
- * THAN ONE product matches: it lists every match rather than guessing which
- * one the caller meant.
- */
-export async function resolveProduct(bc, identifier, storeHash) {
-  const { product_id, sku } = identifier || {};
-  const hasId =
-    product_id !== undefined && product_id !== null && String(product_id) !== "";
-  const hasSku = sku !== undefined && sku !== null && String(sku).trim() !== "";
-
-  if (!hasId && !hasSku) {
-    throw new Error("identifier must include a `product_id` or a `sku`.");
-  }
-
-  let ids;
-  if (hasId) {
-    ids = [product_id];
-  } else {
-    ids = await findProductIdsBySku(bc, String(sku), storeHash);
-    if (ids.length === 0) {
-      throw new Error(`No product found with SKU "${sku}".`);
-    }
-    if (ids.length > 1) {
-      const matches = await fetchFullProductsByIds(bc, ids, storeHash);
-      const list = matches
-        .map((p) => `#${p.id} "${p.name}" (base SKU ${p.sku || "—"})`)
-        .join("; ");
-      throw new Error(
-        `SKU "${sku}" matches more than one product: ${list}. Disambiguate with product_id.`
-      );
-    }
-  }
-
-  // `ids` is now exactly one product id. Fetch it via the single-record
-  // endpoint rather than the `id:in=` list query: a style-with-color+size
-  // legacy product can carry 80+ variants, and the by-id endpoint returns the
-  // full variant set in one predictable subrequest. fetchFullProductsByIds
-  // stays for the genuine multi-id callers (e.g. the duplicate-SKU path above).
-  const notFound = () =>
-    new Error(
-      hasId
-        ? `No product found with product_id ${product_id}.`
-        : `No product found with SKU "${sku}".`
-    );
-
-  let data;
-  try {
-    data = await bc.get(
-      `/v3/catalog/products/${encodeURIComponent(ids[0])}?include=variants,custom_fields`,
-      { storeHash }
-    );
-  } catch (e) {
-    // The bc client sets `status` from the HTTP response (see bc-client.js);
-    // a 404 means the id doesn't exist. Re-throw the friendly, identifier-named
-    // message so operators see it rather than a bare BigCommerce 404. Any other
-    // error (auth, 5xx, network) propagates unchanged.
-    if (e && e.status === 404) throw notFound();
-    throw e;
-  }
-
-  const product = data.data;
-  if (!product) throw notFound();
-  return product;
 }
 
 /**
@@ -444,7 +315,7 @@ export async function fetchAllPages(
         `fetchAllPages exceeded its ${maxPages}-page subrequest cap while paginating "${path}" ` +
           `(fetched ${pagesFetched} pages, more remain). Each page is a Cloudflare Workers subrequest ` +
           `(limit 50 on Free, 1000 on paid), and the cap stays below that ceiling on purpose to leave ` +
-          `room for the non-pagination subrequests in the same request (resolveProduct, the write, and ` +
+          `room for the non-pagination subrequests in the same request (SKU lookups, writes, and ` +
           `read-back verification); raise maxPages or narrow the query.`
       );
     }

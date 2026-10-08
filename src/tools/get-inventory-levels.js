@@ -32,9 +32,8 @@ const executeFunction = async ({ skus, product_id, store_Hash } = {}, { bc }) =>
 
     // When filtering by SKU, only return the requested SKUs (a product may
     // carry sibling variants we didn't ask about). Compare case-INSENSITIVELY
-    // to match fetchProductsBySkus / findProductIdsBySku — BigCommerce's sku:in
-    // is case-insensitive, so a lowercase query resolves an uppercase-stored
-    // SKU, and a byte-exact filter here would drop every resolved row and
+    // to match fetchProductsBySkus — BigCommerce's sku:in is case-insensitive,
+    // so a lowercase query resolves an uppercase-stored SKU, and a byte-exact filter here would drop every resolved row and
     // falsely report the SKU as missing. Returned rows keep their stored casing.
     if (hasSkus) {
       const wanted = new Set(skus.map((s) => String(s).toUpperCase()));

@@ -166,7 +166,7 @@ aborts opaquely, mid-tool, with no usable error.
 
 The budget is **per REQUEST, not per helper**. Every `bc.get` / `bc.put` in a
 single `tools/call` draws from the same pool — a category-tree sweep, the
-`resolveProduct` lookup, the write itself, and read-back verification all count
+SKU lookups, the write itself, and read-back verification all count
 together. A guard that only watches its own calls (e.g. `fetchAllPages`
 counting pages) can therefore report itself within limits while the request as
 a whole blows the ceiling.

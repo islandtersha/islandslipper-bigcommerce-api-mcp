@@ -10,7 +10,7 @@ const BASE_URL = "https://api.bigcommerce.com/stores";
 /**
  * Cloudflare Workers cap outbound subrequests per incoming request: 50 on the
  * Free plan, 1000 on paid. This budget is shared across the WHOLE tool call —
- * pagination, resolveProduct, the write, and read-back verification all draw
+ * pagination, SKU lookups, writes, and read-back verification all draw
  * from the same pool. We throw our own clear error at a soft cap safely below
  * 50 so it wins the race against Cloudflare's opaque abort at the ceiling. The
  * counter is incremented per ACTUAL fetch — 429 retries included — so the cap
