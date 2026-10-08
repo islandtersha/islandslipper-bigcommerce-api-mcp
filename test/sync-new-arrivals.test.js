@@ -311,3 +311,13 @@ test("refuses when a root category is missing from the tree", async () => {
   );
   assert.equal(bc.calls.length, 0);
 });
+
+test("warns (only) about 114 products in neither the Men nor the Women tree", async () => {
+  const bc = fakeBc(SPLIT);
+  const r = await runNewArrivalsSync(bc, ENV, { now: NOW });
+  const w = r.warnings.outside_men_women_trees;
+  assert.equal(w.count, 1);
+  assert.deepEqual(w.products, [{ id: 33, name: "P33", sku: "SKU33", categories: [20] }]);
+  assert.ok(cat(r, 114).sort_order.some((x) => x.product_id === 33)); // still in 114
+  assert.match(r.summary, / outside_trees=1 writes=/);
+});

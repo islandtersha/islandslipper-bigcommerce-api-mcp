@@ -264,9 +264,10 @@ test("planNewArrivals: 115/116 are strict subsets of 114 by tree; unisex in both
     product(5, { launch: "2020-01-01", categories: [1, 115] }), // old, sitting in 115
     product(6, { launch: "2026-09-27", categories: [3, 113] }), // excluded (Last Call)
   ];
-  const { targets } = planNewArrivals(products, TREE, config, TODAY);
+  const { targets, outsideTrees } = planNewArrivals(products, TREE, config, TODAY);
   const [n, m, w] = targets;
   assert.deepEqual(n.members.map((x) => x.id), [1, 2, 3, 4]); // window has 4: no top-up
+  assert.deepEqual(outsideTrees.map((x) => x.id), [4]); // warning only; 4 stays in 114
   assert.deepEqual(m.members.map((x) => x.id), [1, 3]);
   assert.deepEqual(w.members.map((x) => x.id), [2, 3]);
   assert.deepEqual(m.plan.remove, [5]);

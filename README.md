@@ -62,7 +62,9 @@ product's real launch date instead.
   products in 114 that are also in **Men (1)** or any of its subcategories.
   Category **116 (New Women's Footwear)** works the same way for **Women (3)**.
   Unisex products in both trees go in both. Products in neither tree stay in
-  114 only. 115 and 116 aren't topped up, because category pages also show
+  114 only; the audit and sync list them under
+  `warnings.outside_men_women_trees` (and the cron logs `outside_trees=N`) so
+  their categories can be fixed in BC admin. 115 and 116 aren't topped up, because category pages also show
   products from child categories, so they can be empty. They use 114's order.
 - When splitting a color off a parent, set `~launch_date` to the **original**
   color's launch date (use `2020-01-01` for legacy styles with unknown dates).
@@ -108,7 +110,7 @@ there and redeploy. A dashboard edit would be overwritten on the next deploy.
 Runs at 15:00 UTC (5:00 AM HST) and calls the same sync. Unless
 `NEW_ARRIVALS_LIVE` is exactly `"true"` it runs as a dry run. Each run writes
 one line to Workers Logs, e.g.
-`new_arrivals_sync mode=live status=ok date=2026-10-08 cat114=target:5,added:1,removed:1,sort_changed:true cat115=… cat116=… writes=7 subrequests=14`.
+`new_arrivals_sync mode=live status=ok date=2026-10-08 cat114=target:5,added:1,removed:1,sort_changed:true cat115=… cat116=… outside_trees=0 writes=7 subrequests=14`.
 A failed run logs `status=error` and shows as failed in the Cloudflare dashboard.
 
 ### Running it (in Claude, through the connector)

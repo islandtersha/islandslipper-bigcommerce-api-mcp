@@ -341,7 +341,9 @@ export function subsetMembers(members, treeIds) {
  * @param config     readNewArrivalsConfig(...)
  * @param today      "YYYY-MM-DD"
  * @returns {{ result, targets: Array<{ key, label, categoryId, rootId, members,
- *            currentIds, plan, whyNot(id) }> }}  targets in write order: 114, 115, 116.
+ *            currentIds, plan, whyNot(id) }>, outsideTrees: members[] }}
+ *          targets in write order: 114, 115, 116. outsideTrees = target-set
+ *          members in neither root tree (a warning; membership is unaffected).
  */
 export function planNewArrivals(products, categories, config, today) {
   const result = computeNewArrivals(products, {
@@ -367,6 +369,7 @@ export function planNewArrivals(products, categories, config, today) {
       label,
       categoryId,
       rootId,
+      tree,
       members: subsetMembers(result.members, tree),
       whyNot: (id) =>
         inTarget.has(id)
@@ -393,7 +396,29 @@ export function planNewArrivals(products, categories, config, today) {
     return { ...t, currentIds, plan: planCategorySync(t.members, currentIds) };
   });
 
-  return { result, targets };
+  // Warning only: target-set products in neither the Men nor the Women tree.
+  // They stay in 114 and are listed so their categories can be fixed in admin.
+  const inSubset = new Set(targets.slice(1).flatMap((t) => t.members.map((m) => m.id)));
+  const outsideTrees = result.members.filter((m) => !inSubset.has(m.id));
+
+  return { result, targets, outsideTrees };
+}
+
+/** Report rows for planNewArrivals(...).outsideTrees. */
+export function outsideTreesWarning(outsideTrees, config) {
+  return {
+    message:
+      `In the ${config.categoryId} target set but in neither the Men (${config.mensRootId}) nor the ` +
+      `Women (${config.womensRootId}) tree, so in neither ${config.mensCategoryId} nor ` +
+      `${config.womensCategoryId}. Warning only: fix their categories in BC admin.`,
+    count: outsideTrees.length,
+    products: outsideTrees.map((m) => ({
+      id: m.id,
+      name: m.product.name,
+      sku: m.product.sku,
+      categories: (m.product.categories || []).map(Number),
+    })),
+  };
 }
 
 /**

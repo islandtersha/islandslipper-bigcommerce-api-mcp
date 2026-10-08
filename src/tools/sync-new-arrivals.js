@@ -37,7 +37,12 @@ import {
   markSubrequestBudgetError,
 } from "../bc-client.js";
 import { loadNewArrivalsCatalog, loadCategoryTree } from "./audit-new-arrivals.js";
-import { planNewArrivals, readNewArrivalsConfig, todayHst } from "../lib/new-arrivals.js";
+import {
+  planNewArrivals,
+  outsideTreesWarning,
+  readNewArrivalsConfig,
+  todayHst,
+} from "../lib/new-arrivals.js";
 
 /** Products per write call. BigCommerce documents no maximum; stay modest. */
 const ADD_CHUNK = 100;
@@ -67,7 +72,7 @@ export async function runNewArrivalsSync(
   const categories = await loadCategoryTree(bc, storeHash);
 
   // 2. Target sets and diffs for 114, 115, 116.
-  const { result, targets } = planNewArrivals(products, categories, config, today);
+  const { result, targets, outsideTrees } = planNewArrivals(products, categories, config, today);
   if (result.members.length === 0) {
     throw new Error(
       `Target set is empty (no eligible products); refusing to sync rather than empty category ${config.categoryId}.`
@@ -100,6 +105,7 @@ export async function runNewArrivalsSync(
     as_of_hst: today,
     window_days: config.windowDays,
     categories: sections.map((s) => categoryReport(s, byId)),
+    warnings: { outside_men_women_trees: outsideTreesWarning(outsideTrees, config) },
     writes_total: allWrites.length,
     subrequests_projected_for_live: bc.subrequestCount + liveNeeds,
   };
@@ -335,7 +341,8 @@ function summaryLine(r, mode) {
     .join(" ");
   return (
     `new_arrivals_sync mode=${mode} status=ok date=${r.as_of_hst} ${cats} ` +
-    `writes=${r.writes_total} subrequests=${r.subrequests_used}`
+    `outside_trees=${r.warnings.outside_men_women_trees.count} writes=${r.writes_total} ` +
+    `subrequests=${r.subrequests_used}`
   );
 }
 
@@ -359,7 +366,7 @@ const apiTool = {
     function: {
       name: "sync_new_arrivals",
       description:
-        "Sync the New Arrivals category (NEW_ARRIVALS_CATEGORY_ID, default 114) and its men's / women's subsets (default 115 / 116) with the shared launch-date rule. 114 = the target set (topped up to 4). 115 / 116 = the target-set products assigned to Men (MENS_ROOT_CATEGORY_ID, default 1) / Women (WOMENS_ROOT_CATEGORY_ID, default 3) or any descendant; no top-up, may be empty. For each category: adds missing products, removes stale ones FROM THAT CATEGORY ONLY (a product's other categories are never touched), and sets the sort order newest first. Same rules as audit_new_arrivals. WRITE TOOL — defaults to dry_run=true, which returns the exact writes without sending them. Refuses to run on an empty product sweep or empty 114 target set, pre-checks every delete filter, and refuses before the first write if the run would exceed the subrequest budget. Idempotent: an unchanged catalog plans zero writes. A live run verifies each written category afterwards. Returns { dry_run, as_of_hst, window_days, categories[] (per category: category_id, label, root_category_id, target_count, added[], removed[], unchanged[], sort_order[], sort_order_changed, writes[], remove_filter_checks[], verification? (live)), writes_total, subrequests_used, subrequests_projected_for_live, summary }.",
+        "Sync the New Arrivals category (NEW_ARRIVALS_CATEGORY_ID, default 114) and its men's / women's subsets (default 115 / 116) with the shared launch-date rule. 114 = the target set (topped up to 4). 115 / 116 = the target-set products assigned to Men (MENS_ROOT_CATEGORY_ID, default 1) / Women (WOMENS_ROOT_CATEGORY_ID, default 3) or any descendant; no top-up, may be empty. For each category: adds missing products, removes stale ones FROM THAT CATEGORY ONLY (a product's other categories are never touched), and sets the sort order newest first. Same rules as audit_new_arrivals. WRITE TOOL — defaults to dry_run=true, which returns the exact writes without sending them. Refuses to run on an empty product sweep or empty 114 target set, pre-checks every delete filter, and refuses before the first write if the run would exceed the subrequest budget. Idempotent: an unchanged catalog plans zero writes. A live run verifies each written category afterwards. Also returns warnings.outside_men_women_trees: 114 target-set products in neither the Men nor the Women tree (id, name, sku, categories) — a warning only; membership is unaffected. Returns { dry_run, as_of_hst, window_days, categories[] (per category: category_id, label, root_category_id, target_count, added[], removed[], unchanged[], sort_order[], sort_order_changed, writes[], remove_filter_checks[], verification? (live)), warnings, writes_total, subrequests_used, subrequests_projected_for_live, summary }.",
       parameters: {
         type: "object",
         properties: {

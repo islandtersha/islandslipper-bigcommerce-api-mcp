@@ -14,6 +14,7 @@
 import { fetchAllPages } from "./catalog-helpers.js";
 import {
   planNewArrivals,
+  outsideTreesWarning,
   readNewArrivalsConfig,
   todayHst,
   hstDateOf,
@@ -51,7 +52,7 @@ const executeFunction = async ({ window_days, store_Hash } = {}, { bc, env }) =>
     const byId = new Map(categories.map((c) => [c.category_id, c]));
 
     // 3. Apply the shared rules to 114, 115, 116.
-    const { result, targets } = planNewArrivals(products, categories, config, today);
+    const { result, targets, outsideTrees } = planNewArrivals(products, categories, config, today);
     const memberById = new Map(result.members.map((m) => [m.id, m]));
     const ev = (id) => result.evaluated.get(id);
     const whyNot = (id) => targets[0].whyNot(id);
@@ -229,6 +230,7 @@ const executeFunction = async ({ window_days, store_Hash } = {}, { bc, env }) =>
       category_details: categoryDetails,
       current_contents: currentContents,
       cleanup_preview: cleanupPreview,
+      warnings: { outside_men_women_trees: outsideTreesWarning(outsideTrees, config) },
       subrequests_used: bc.subrequestCount,
     };
   } catch (error) {
@@ -244,7 +246,7 @@ const apiTool = {
     function: {
       name: "audit_new_arrivals",
       description:
-        "READ-ONLY audit of the New Arrivals category sync. Applies the shared date rule (effective launch date = valid ~launch_date custom field, else date_created as an HST date; new when 0 <= days < window, default 60; future dates excluded) and membership rule (visible, not in excluded categories; top up to 4 with the most recent eligible products; newest first, ties by id desc). Returns: would_be_new_arrivals (position, effective date, source, in_window|top_up); needs_launch_date (created inside the window with no valid ~launch_date); launch_date_issues (valid, malformed, and trimmed values); featured_flag (is_featured products); legacy_new_field (~new, plus ~new* lookalikes); category_details for 114 and its men's / women's subsets 115 / 116, each with a warning if its default sort isn't Featured; current_contents of those categories with stay/remove verdicts against each category's own target; cleanup_preview keyed by category id (exact add/remove/sort_order the next sync would produce for 114, 115 and 116; 115 / 116 = target-set products in Men / Women (default roots 1 / 3) or any descendant, no top-up); subrequests_used. Makes no writes.",
+        "READ-ONLY audit of the New Arrivals category sync. Applies the shared date rule (effective launch date = valid ~launch_date custom field, else date_created as an HST date; new when 0 <= days < window, default 60; future dates excluded) and membership rule (visible, not in excluded categories; top up to 4 with the most recent eligible products; newest first, ties by id desc). Returns: would_be_new_arrivals (position, effective date, source, in_window|top_up); needs_launch_date (created inside the window with no valid ~launch_date); launch_date_issues (valid, malformed, and trimmed values); featured_flag (is_featured products); legacy_new_field (~new, plus ~new* lookalikes); category_details for 114 and its men's / women's subsets 115 / 116, each with a warning if its default sort isn't Featured; current_contents of those categories with stay/remove verdicts against each category's own target; cleanup_preview keyed by category id (exact add/remove/sort_order the next sync would produce for 114, 115 and 116; 115 / 116 = target-set products in Men / Women (default roots 1 / 3) or any descendant, no top-up); warnings.outside_men_women_trees (114 target-set products in neither the Men nor the Women tree, with id, name, sku, current categories — warning only, membership unaffected); subrequests_used. Makes no writes.",
       parameters: {
         type: "object",
         properties: {
