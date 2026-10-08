@@ -58,6 +58,12 @@ product's real launch date instead.
   it's topped up with the most recently launched eligible products (never
   future-dated ones).
 - **Order** = newest launch date first; ties go to the higher product ID.
+- **Men's / women's subsets**: category **115 (New Men's Footwear)** gets the
+  products in 114 that are also in **Men (1)** or any of its subcategories.
+  Category **116 (New Women's Footwear)** works the same way for **Women (3)**.
+  Unisex products in both trees go in both. Products in neither tree stay in
+  114 only. 115 and 116 aren't topped up, because category pages also show
+  products from child categories, so they can be empty. They use 114's order.
 - When splitting a color off a parent, set `~launch_date` to the **original**
   color's launch date (use `2020-01-01` for legacy styles with unknown dates).
 
@@ -66,22 +72,30 @@ and is covered by `npm test`.
 
 ### What the sync changes
 
-- Adds products to category 114, removes stale ones **from 114 only**, and sets
-  114's product sort order. A product's other categories are never touched.
-  Categories 115 and 116 are reported by the audit but never written.
-- Category 114's default sort must be **Featured** in BC admin, or the sort
+- For each of 114, 115 and 116 it adds missing products, removes stale ones
+  **from that category only**, and sets that category's sort order. A
+  product's other categories are never touched. It writes 114 first, then 115,
+  then 116.
+- Each category's default sort must be **Featured** in BC admin, or the sort
   order the sync sets won't control what shoppers see. The audit warns if it isn't.
-- Safety checks: before any delete, it reads the assignments with the exact same
-  filter and refuses unless they match. It refuses to run on an empty catalog
-  read or an empty target set. It checks the subrequest budget before the first
-  write. It reads the category back after a live run.
+- Safety checks, for each category: before any delete, it reads the assignments
+  with the exact same filter and refuses unless they match. All of these checks
+  run before the first write. It refuses to run on an empty catalog read or an
+  empty 114 target set (an empty 115 or 116 is fine). It refuses if a root
+  category is missing or if a managed category sits inside the Men or Women
+  tree. It checks the subrequest budget for all three categories before the
+  first write. It reads each written category back after a live run.
 - A day with no catalog changes sends no writes.
 
 ### Settings (`[vars]` in `wrangler.toml`)
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `NEW_ARRIVALS_CATEGORY_ID` | `114` | The category the sync manages. |
+| `NEW_ARRIVALS_CATEGORY_ID` | `114` | The New Arrivals category the sync manages. |
+| `NEW_ARRIVALS_MENS_CATEGORY_ID` | `115` | New Men's Footwear: 114's products in the Men tree. |
+| `NEW_ARRIVALS_WOMENS_CATEGORY_ID` | `116` | New Women's Footwear: 114's products in the Women tree. |
+| `MENS_ROOT_CATEGORY_ID` | `1` | Root of the Men tree (it and every subcategory count). |
+| `WOMENS_ROOT_CATEGORY_ID` | `3` | Root of the Women tree (it and every subcategory count). |
 | `NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS` | `113,83,84,85` | Never included: Last Call (113) and the Vault tree (83–85). |
 | `NEW_ARRIVALS_WINDOW_DAYS` | `60` | How many days a product counts as new. |
 | `NEW_ARRIVALS_LIVE` | `false` | The daily cron writes only when this is exactly `true`. |
@@ -94,7 +108,7 @@ there and redeploy. A dashboard edit would be overwritten on the next deploy.
 Runs at 15:00 UTC (5:00 AM HST) and calls the same sync. Unless
 `NEW_ARRIVALS_LIVE` is exactly `"true"` it runs as a dry run. Each run writes
 one line to Workers Logs, e.g.
-`new_arrivals_sync mode=live status=ok … added=1 removed=1 … writes=3 subrequests=7`.
+`new_arrivals_sync mode=live status=ok date=2026-10-08 cat114=target:5,added:1,removed:1,sort_changed:true cat115=… cat116=… writes=7 subrequests=14`.
 A failed run logs `status=error` and shows as failed in the Cloudflare dashboard.
 
 ### Running it (in Claude, through the connector)
@@ -104,8 +118,9 @@ A failed run logs `status=error` and shows as failed in the Cloudflare dashboard
    `updates: [{ product_id, launch_date }]`. Check the dry run, then repeat with
    `dry_run: false`.
 3. **Dry run:** `sync_new_arrivals`. It defaults to `dry_run: true` and shows the
-   exact add, remove, and sort-order requests.
-4. **Live run:** `sync_new_arrivals` with `dry_run: false`. Check `/featured/new`.
+   exact add, remove, and sort-order requests for 114, 115 and 116.
+4. **Live run:** `sync_new_arrivals` with `dry_run: false`. Check `/featured/new`
+   and the two subcategory pages.
 5. **Turn on the daily cron:** set `NEW_ARRIVALS_LIVE = "true"` in
    `wrangler.toml`, commit, and redeploy.
 
@@ -116,7 +131,8 @@ Claude; tool lists are read when the connector connects.
 
 1. Set `NEW_ARRIVALS_LIVE` to anything other than `"true"` (e.g. `"false"`) in
    `wrangler.toml` and redeploy. The cron goes back to dry runs.
-2. If needed, empty category 114 (or restore its old products) in BC admin.
+2. If needed, empty categories 114, 115 and 116 (or restore their old
+   products) in BC admin.
 
 `~launch_date` values written by `set_launch_date` can be edited or deleted
 on the product in BC admin.
