@@ -24,8 +24,13 @@
  *   node scripts/add-ships-modifier.mjs --check-scope   # API-scope probe, see below
  *
  * Writes a CSV report to reports/YYYYMMDD-N_ships-modifier-{dryrun|apply}.csv.
- * Re-runnable: a product that already has a "Ships" modifier is skipped.
- * The only write is POST /v3/catalog/products/{id}/modifiers.
+ * Ships gets a sort_order after every variant option and other modifier, so it
+ * comes last in the PDP form.
+ * Re-runnable: a product whose Ships already sorts last is skipped. A
+ * product-level Ships that sorts before an option gets its sort_order fixed;
+ * a shared Ships (product 492) is never touched.
+ * Writes: POST /v3/catalog/products/{id}/modifiers (create) and
+ * PUT /v3/catalog/products/{id}/modifiers/{modifier_id} with only sort_order.
  */
 
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
@@ -268,6 +273,15 @@ function isShips(modifier) {
   return name === SHIPS_NAME.toLowerCase();
 }
 
+/**
+ * The sort_order that puts Ships after every variant option and every other
+ * modifier on the PDP (options and modifiers share one ordering).
+ */
+function shipsSortOrder(options, modifiers) {
+  const others = [...options, ...modifiers.filter((m) => !isShips(m))];
+  return Math.max(-1, ...others.map((o) => Number(o.sort_order) || 0)) + 1;
+}
+
 function describeModifiers(modifiers) {
   return modifiers
     .map((m) => `${m.display_name} (${m.type}${m.shared_option_id ? `, shared ${m.shared_option_id}` : ""})`)
@@ -286,6 +300,7 @@ const CSV_COLUMNS = [
   "existing_modifiers",
   "action",
   "modifier_id",
+  "sort_order",
   "error",
 ];
 
@@ -363,6 +378,7 @@ async function main() {
       existing_modifiers: "",
       action: "",
       modifier_id: "",
+      sort_order: "",
       error: "",
     };
     rows.push(row);
@@ -370,15 +386,40 @@ async function main() {
     try {
       const modifiers = await bc.getAll(`/v3/catalog/products/${p.id}/modifiers`, {});
       row.existing_modifiers = describeModifiers(modifiers);
+      const ships = modifiers.find(isShips);
 
       if (args.excludeIds.has(p.id)) row.action = "skip_excluded";
       else if (!match) row.action = "skip_out_of_scope";
-      else if (modifiers.some(isShips)) row.action = "skip_has_ships";
-      else {
-        row.action = "create";
-        if (args.apply) {
-          const created = await bc.request("POST", `/v3/catalog/products/${p.id}/modifiers`, MODIFIER_PAYLOAD);
-          row.modifier_id = created.data?.id ?? "";
+      else if (ships?.shared_option_id) {
+        // Shared modifier (492): managed in admin, never touched here.
+        row.action = "skip_has_ships";
+        row.modifier_id = ships.id;
+        row.sort_order = ships.sort_order;
+      } else {
+        const options = await bc.getAll(`/v3/catalog/products/${p.id}/options`, {});
+        const target = shipsSortOrder(options, modifiers);
+        if (!ships) {
+          row.action = "create";
+          row.sort_order = target;
+          if (args.apply) {
+            const created = await bc.request("POST", `/v3/catalog/products/${p.id}/modifiers`, {
+              ...MODIFIER_PAYLOAD,
+              sort_order: target,
+            });
+            row.modifier_id = created.data?.id ?? "";
+          }
+        } else if ((Number(ships.sort_order) || 0) < target) {
+          // Already has Ships, but it sorts before a variant option.
+          row.action = "fix_sort_order";
+          row.modifier_id = ships.id;
+          row.sort_order = `${ships.sort_order} -> ${target}`;
+          if (args.apply) {
+            await bc.request("PUT", `/v3/catalog/products/${p.id}/modifiers/${ships.id}`, { sort_order: target });
+          }
+        } else {
+          row.action = "skip_has_ships";
+          row.modifier_id = ships.id;
+          row.sort_order = ships.sort_order;
         }
       }
     } catch (err) {
@@ -398,7 +439,8 @@ async function main() {
   console.log(`Products:              ${rows.length}`);
   console.log(`In scope:              ${inScope.length}`);
   console.log(`Out of scope:          ${rows.length - inScope.length}`);
-  console.log(`${args.apply ? "Created" : "Would create"}:${args.apply ? "               " : "          "}${count((r) => r.action === "create")}`);
+  console.log(`${(args.apply ? "Created:" : "Would create:").padEnd(23)}${count((r) => r.action === "create")}`);
+  console.log(`${(args.apply ? "Fixed sort_order:" : "Would fix sort_order:").padEnd(23)}${count((r) => r.action === "fix_sort_order")}`);
   console.log(`skip_has_ships:        ${count((r) => r.action === "skip_has_ships")}`);
   console.log(`skip_out_of_scope:     ${count((r) => r.action === "skip_out_of_scope")}`);
   console.log(`skip_excluded:         ${count((r) => r.action === "skip_excluded")}`);
