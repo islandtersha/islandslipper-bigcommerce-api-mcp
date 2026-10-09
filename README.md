@@ -164,6 +164,33 @@ No new secrets are needed. The settings above are plain `[vars]`, and
 `set_launch_date` / `sync_new_arrivals` use the existing `BC_ACCESS_TOKEN`,
 which needs the **Products: modify** scope.
 
+## Made-to-order lead time (`/lead-time`)
+
+Public endpoint the storefront PDP reads to say "Hand Made to Order — Allow N
+weeks". N comes from the count of BigCommerce orders not yet shipped:
+
+| Unshipped orders | Weeks |
+| --- | --- |
+| 0–10 | 3 |
+| 11–40 | 6 |
+| 41–100 | 8 |
+| 101+ | 10 |
+
+```json
+{ "weeks": 8, "message": "Hand Made to Order — Allow 8 weeks", "updated_at": "2026-10-09T19:00:00.000Z" }
+```
+
+- **Never returns the order count.** The count is only logged (Workers Logs).
+- **Settings** (breakpoints, counted status ids, optional order-age window,
+  freshness, CORS origins) live in `LEAD_TIME_CONFIG` in `src/lead-time.js`.
+- **Freshness:** the last result is stored in the `LEAD_TIME_KV` namespace and
+  recomputed with one BigCommerce call (`GET /v2/orders/count`) once it is
+  5 minutes old. Browsers may cache the response for 60 seconds.
+- **On a BigCommerce error** it serves the last stored result; with none stored,
+  the longest lead time (10 weeks) with `"fallback": true`.
+- **CORS:** `https://shop.islandslipper.com` and `http://localhost:3000`.
+- The BigCommerce token needs the **Orders: read-only** scope (already required).
+
 ## Install & deploy
 
 ### Prerequisites
@@ -278,6 +305,7 @@ Use `npm run tail` (`wrangler tail`) to stream live logs from a deployed Worker.
 | `/.well-known/oauth-authorization-server` | GET | none | OAuth metadata discovery (RFC 8414). |
 | `/health` | GET | none | Liveness probe. |
 | `/info` | GET | none | Server metadata. |
+| `/lead-time` | GET | none | Made-to-order lead time for the storefront (see below). |
 
 ## Notes
 
