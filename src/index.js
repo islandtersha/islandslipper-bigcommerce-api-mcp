@@ -20,6 +20,10 @@
  * bound in wrangler.toml. The MCP_AUTH_TOKEN secret is the master key an
  * operator pastes at /authorize to approve a new client.
  *
+ * GET /lead-time (public made-to-order lead time for the storefront, see
+ * lead-time.js) is answered here BEFORE the provider, so it never touches the
+ * OAuth layer and /mcp keeps its protection unchanged.
+ *
  * The `scheduled` handler runs the daily New Arrivals sync (cron in
  * wrangler.toml), which writes only when NEW_ARRIVALS_LIVE is "true".
  */
@@ -29,6 +33,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { mcpApiHandler } from "./mcp-api-handler.js";
 import { defaultHandler } from "./auth-handler.js";
 import { runScheduledNewArrivalsSync } from "./scheduled.js";
+import { LEAD_TIME_PATH, handleLeadTime } from "./lead-time.js";
 
 const provider = new OAuthProvider({
   apiRoute: "/mcp",
@@ -42,6 +47,9 @@ const provider = new OAuthProvider({
 
 export default {
   fetch(request, env, ctx) {
+    if (new URL(request.url).pathname === LEAD_TIME_PATH) {
+      return handleLeadTime(request, env, ctx);
+    }
     return provider.fetch(request, env, ctx);
   },
 

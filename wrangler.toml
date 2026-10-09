@@ -29,6 +29,17 @@ binding = "OAUTH_KV"
 id = "50db44a3ff394b0b97f9b57051a76adb"
 preview_id = "fe97b62951cf4ffea7a2fcfda256c2a3"
 
+# ---------------------------------------------------------------------------
+# Public /lead-time endpoint (src/lead-time.js): stores the last computed
+# made-to-order lead time (weeks + timestamp, never the order count).
+#   wrangler kv namespace create LEAD_TIME_KV             -> copy "id"
+#   wrangler kv namespace create LEAD_TIME_KV --preview   -> copy "preview_id"
+# ---------------------------------------------------------------------------
+[[kv_namespaces]]
+binding = "LEAD_TIME_KV"
+id = "ac71ace186794df08dd39d9211bf204f"
+preview_id = "07a36839caae47fd90609cf526b9877c"
+
 [observability]
 enabled = true
 
