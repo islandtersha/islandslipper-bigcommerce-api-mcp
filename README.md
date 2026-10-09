@@ -191,6 +191,56 @@ weeks". N comes from the count of BigCommerce orders not yet shipped:
 - **CORS:** `https://shop.islandslipper.com` and `http://localhost:3000`.
 - The BigCommerce token needs the **Orders: read-only** scope (already required).
 
+## "Ships" modifier rollout (`scripts/add-ships-modifier.mjs`)
+
+One-off local script (not part of the Worker) that gives footwear the hidden,
+optional **`Ships`** text modifier the theme (v0.14.0+) fills with the delivery
+promise the shopper saw. The theme finds the field by display name, so a
+product-level modifier works the same as the shared one on product 492.
+
+- **Scope:** products in the Men or Women category trees (top-level `/men`
+  and `/women` plus every subcategory, resolved from the live category list)
+  or in Last Call category 113. Everything else (accessories, ornaments, gift
+  bundles, Vault-only products) is left alone, so their cards keep
+  "Add to Cart". `--exclude-ids` (default `212,446,234,236,237,326,419`: the Gift Card
+  product, TEST, and non-footwear in the Men tree) is a safety net.
+- **Writes:** `POST /v3/catalog/products/{id}/modifiers` (`type: text`,
+  `display_name: Ships`, `required: false`, empty default), and
+  `PUT .../modifiers/{modifier_id}` with only `sort_order`. Both need the
+  **Products: modify** scope.
+- **Sort order:** `Ships` gets a `sort_order` after every variant option and
+  other modifier, so it is last in the PDP form. A product-level `Ships` that
+  sorts earlier is fixed (`fix_sort_order`); the shared one on 492 is never
+  touched.
+- **Re-runnable:** products whose `Ships` already sorts last are skipped
+  (`skip_has_ships`).
+- **Report:** `reports/YYYYMMDD-N_ships-modifier-{dryrun|apply}.csv`
+  (gitignored), with columns `product_id, name, sku, is_visible,
+  has_variant_options, in_scope, existing_modifiers, action, modifier_id,
+  sort_order, error`. `action` is `create`, `fix_sort_order`,
+  `skip_has_ships`, `skip_out_of_scope`, `skip_excluded` or `error`.
+- **Re-run it** (dry run, then `--apply`) after reviving a Vault product into
+  Men/Women/Last Call, or after adding a product that wasn't copied from one
+  that already has `Ships`.
+
+```powershell
+cd C:\Users\tersh\OneDrive\Desktop\Documents\GitHub\islandslipper-bigcommerce-api-mcp
+
+# Dry run (default; changes nothing)
+node scripts/add-ships-modifier.mjs
+
+# Optional: prove the token can write modifiers (one POST with an empty body;
+# HTTP 422 = OK, 403 = scope missing; nothing is created)
+node scripts/add-ships-modifier.mjs --ids 497 --check-scope
+
+# Test batch, then everything
+node scripts/add-ships-modifier.mjs --apply --ids 497,107,182,498
+node scripts/add-ships-modifier.mjs --apply
+
+# Confirm: every in-scope product should now report skip_has_ships
+node scripts/add-ships-modifier.mjs
+```
+
 ## Install & deploy
 
 ### Prerequisites
