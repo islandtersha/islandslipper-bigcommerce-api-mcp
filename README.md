@@ -241,6 +241,41 @@ node scripts/add-ships-modifier.mjs --apply
 node scripts/add-ships-modifier.mjs
 ```
 
+## Lead-time wording audit (`scripts/audit-lead-time-wording.mjs`)
+
+Read-only local script that finds old static lead-time copy ("handmade in
+2-3 weeks", "allow 6-8 weeks", ...) that contradicts the live PDP line
+"Hand Made to Order — Allow N weeks". It sends **GET requests only** (the
+client has no other method) and never touches the theme repo beyond
+`git grep`.
+
+- **Sources:** products (all, visible and hidden: `description`,
+  `availability_description`, `warranty`, custom fields), web pages
+  (`/v3/content/pages`), blog posts (`/v2/blog/posts`), and the theme repo
+  (tracked files, default `..\islandslipper-bc-theme-1`). Pages and blog
+  need the **Store Content: read-only** scope; on 403 that source is reported
+  as skipped and gets no CSV.
+- **Theme skips:** live lead-time code (`lead-time.js`, `ships-field.js`,
+  `cart-ship-notice.js`, `fall-sale-cart-offer.js`,
+  `product-details-base.js`, `product-details.js`), the three
+  `availability_*` keys in `lang/en.json`, tests and `assets/dist/`.
+  `--show-skipped` prints every skipped line.
+- **Flags:** `range` (week range), `fixed_weeks`, `ships_days_other`
+  (in-stock days other than 3-5 business days), `ok_in_stock`,
+  `ok_no_number` (made-to-order / lead-time wording with no number),
+  `review`. `brand_spelling` is set when the context says "Hawaiian" or
+  "Hawaii".
+- **Reports:** `reports/YYYYMMDD-N_lead-time-audit-{products,pages,blog,theme}.csv`
+  (gitignored, UTF-8 with BOM for Excel), plus a console summary of counts
+  by source and flag and the distinct phrases.
+
+```powershell
+cd C:\Users\tersh\OneDrive\Desktop\Documents\GitHub\islandslipper-bigcommerce-api-mcp
+node scripts/audit-lead-time-wording.mjs
+node scripts/audit-lead-time-wording.mjs --only products,pages
+node scripts/audit-lead-time-wording.mjs --theme "C:\path\to\islandslipper-bc-theme-1" --show-skipped
+```
+
 ## Install & deploy
 
 ### Prerequisites
