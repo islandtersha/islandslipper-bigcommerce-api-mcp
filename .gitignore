@@ -51,3 +51,5 @@ Thumbs.db
 .augment/
 
 .cache_ggshield
+# Local script reports (scripts/*.mjs)
+reports/
