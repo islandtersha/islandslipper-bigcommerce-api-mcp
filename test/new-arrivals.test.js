@@ -10,6 +10,9 @@ import {
   windowStatus,
   computeNewArrivals,
   planCategorySync,
+  planNewArrivals,
+  subtreeIds,
+  subsetMembers,
   readNewArrivalsConfig,
 } from "../src/lib/new-arrivals.js";
 
@@ -187,6 +190,10 @@ test("planCategorySync: add/remove/unchanged and 0-based sort order", () => {
 test("readNewArrivalsConfig: defaults, env, override, and loud failures", () => {
   assert.deepEqual(readNewArrivalsConfig({}), {
     categoryId: 114,
+    mensCategoryId: 115,
+    womensCategoryId: 116,
+    mensRootId: 1,
+    womensRootId: 3,
     windowDays: 60,
     excludeCategoryIds: [113, 83, 84, 85],
     minCount: 4,
@@ -198,5 +205,97 @@ test("readNewArrivalsConfig: defaults, env, override, and loud failures", () => 
   assert.equal(c.windowDays, 30);
   assert.deepEqual(c.excludeCategoryIds, [113, 99]);
   assert.throws(() => readNewArrivalsConfig({ NEW_ARRIVALS_WINDOW_DAYS: "sixty" }), /positive integer/);
-  assert.throws(() => readNewArrivalsConfig({ NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS: "113,114" }), /itself/);
+  assert.throws(() => readNewArrivalsConfig({ NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS: "113,114" }), /managed New Arrivals category 114/);
+  assert.throws(() => readNewArrivalsConfig({ NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS: "113,116" }), /managed New Arrivals category 116/);
+  assert.throws(() => readNewArrivalsConfig({ NEW_ARRIVALS_MENS_CATEGORY_ID: "116" }), /must all differ/);
+  assert.throws(() => readNewArrivalsConfig({ WOMENS_ROOT_CATEGORY_ID: "1" }), /must all differ/);
+  assert.throws(() => readNewArrivalsConfig({ MENS_ROOT_CATEGORY_ID: "men" }), /MENS_ROOT_CATEGORY_ID must be a positive integer/);
+  const s = readNewArrivalsConfig({
+    NEW_ARRIVALS_MENS_CATEGORY_ID: "215",
+    NEW_ARRIVALS_WOMENS_CATEGORY_ID: "216",
+    MENS_ROOT_CATEGORY_ID: "10",
+    WOMENS_ROOT_CATEGORY_ID: "30",
+  });
+  assert.deepEqual([s.mensCategoryId, s.womensCategoryId, s.mensRootId, s.womensRootId], [215, 216, 10, 30]);
+});
+
+// --- Men's / women's subsets (115 / 116) -------------------------------------
+
+// Men 1 > 76 > 142, Women 3 > 79, Featured 70 > New 114 > 115 / 116, other 20.
+const TREE = [
+  { category_id: 1, parent_id: 0 },
+  { category_id: 76, parent_id: 1 },
+  { category_id: 142, parent_id: 76 },
+  { category_id: 3, parent_id: 0 },
+  { category_id: 79, parent_id: 3 },
+  { category_id: 70, parent_id: 0 },
+  { category_id: 114, parent_id: 70 },
+  { category_id: 115, parent_id: 114 },
+  { category_id: 116, parent_id: 114 },
+  { category_id: 20, parent_id: 0 },
+];
+
+test("subtreeIds: root plus every descendant; a missing root fails loudly", () => {
+  assert.deepEqual([...subtreeIds(TREE, 1)].sort((a, b) => a - b), [1, 76, 142]);
+  assert.deepEqual([...subtreeIds(TREE, 3)].sort((a, b) => a - b), [3, 79]);
+  assert.throws(() => subtreeIds(TREE, 99), /Category 99 was not found/);
+});
+
+test("subsetMembers keeps the target order and renumbers positions", () => {
+  const r = computeNewArrivals(
+    [
+      product(1, { launch: "2026-10-01", categories: [142] }),
+      product(2, { launch: "2026-09-30", categories: [79] }),
+      product(3, { launch: "2026-09-29", categories: [1] }),
+    ],
+    { today: TODAY }
+  );
+  const men = subsetMembers(r.members, subtreeIds(TREE, 1));
+  assert.deepEqual(men.map((m) => [m.id, m.position]), [[1, 1], [3, 2]]);
+});
+
+test("planNewArrivals: 115/116 are strict subsets of 114 by tree; unisex in both; neither stays in 114 only", () => {
+  const config = readNewArrivalsConfig({});
+  const products = [
+    product(1, { launch: "2026-10-01", categories: [142] }), // men (grandchild)
+    product(2, { launch: "2026-09-30", categories: [79] }), // women
+    product(3, { launch: "2026-09-29", categories: [76, 79] }), // unisex
+    product(4, { launch: "2026-09-28", categories: [20] }), // neither
+    product(5, { launch: "2020-01-01", categories: [1, 115] }), // old, sitting in 115
+    product(6, { launch: "2026-09-27", categories: [3, 113] }), // excluded (Last Call)
+  ];
+  const { targets, outsideTrees } = planNewArrivals(products, TREE, config, TODAY);
+  const [n, m, w] = targets;
+  assert.deepEqual(n.members.map((x) => x.id), [1, 2, 3, 4]); // window has 4: no top-up
+  assert.deepEqual(outsideTrees.map((x) => x.id), [4]); // warning only; 4 stays in 114
+  assert.deepEqual(m.members.map((x) => x.id), [1, 3]);
+  assert.deepEqual(w.members.map((x) => x.id), [2, 3]);
+  assert.deepEqual(m.plan.remove, [5]);
+  assert.match(m.whyNot(5), /outside the 60-day window/);
+  assert.match(m.whyNot(2), /not in category 1 or any of its subcategories/);
+  assert.deepEqual(m.plan.sort_order, [{ product_id: 1, sort_order: 0 }, { product_id: 3, sort_order: 1 }]);
+});
+
+test("planNewArrivals: subsets never top up and may be empty", () => {
+  const config = readNewArrivalsConfig({});
+  const products = [
+    product(1, { launch: "2026-10-01", categories: [79] }),
+    product(2, { launch: "2025-01-01", categories: [20] }),
+    product(3, { launch: "2024-01-01", categories: [142] }), // old: a 114 top-up
+  ];
+  const { targets } = planNewArrivals(products, TREE, config, TODAY);
+  const [n, m, w] = targets;
+  assert.deepEqual(n.members.map((x) => x.id), [1, 2, 3]);
+  assert.deepEqual(m.members.map((x) => x.id), [3]); // top-up members still count, as members of 114
+  assert.deepEqual(w.members.map((x) => x.id), [1]);
+  const none = planNewArrivals([product(2, { launch: "2026-10-01", categories: [20] })], TREE, config, TODAY);
+  assert.deepEqual(none.targets.map((t) => t.members.length), [1, 0, 0]);
+});
+
+test("planNewArrivals refuses when a managed category sits inside a root tree", () => {
+  const tree = TREE.map((c) => (c.category_id === 115 ? { ...c, parent_id: 1 } : c));
+  assert.throws(
+    () => planNewArrivals([product(1, { launch: "2026-10-01" })], tree, readNewArrivalsConfig({}), TODAY),
+    /Managed category 115 sits inside root category 1/
+  );
 });

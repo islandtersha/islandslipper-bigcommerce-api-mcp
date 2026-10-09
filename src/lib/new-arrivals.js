@@ -24,6 +24,14 @@
  *     effective dates outside the window. Future-dated products never top up.
  *   - Order = effective date newest first; ties broken by product id
  *     descending.
+ *
+ * The men's / women's subsets (115 / 116):
+ *   - Members = the target set's products assigned to the root category
+ *     (Men 1 / Women 3) or any of its descendants. Unisex products in both
+ *     trees go in both; products in neither stay in 114 only.
+ *   - Strict subsets of the target set: no top-up of their own (parent
+ *     category pages show child products). They may be empty.
+ *   - Order = the target set's order.
  */
 
 export const LAUNCH_DATE_FIELD = "~launch_date";
@@ -31,6 +39,10 @@ export const LEGACY_NEW_FIELD = "~new";
 export const DEFAULT_WINDOW_DAYS = 60;
 export const DEFAULT_MIN_COUNT = 4;
 export const DEFAULT_CATEGORY_ID = 114; // Featured > New
+export const DEFAULT_MENS_CATEGORY_ID = 115; // Featured > New > New Men's Footwear
+export const DEFAULT_WOMENS_CATEGORY_ID = 116; // Featured > New > New Women's Footwear
+export const DEFAULT_MENS_ROOT_CATEGORY_ID = 1; // Men
+export const DEFAULT_WOMENS_ROOT_CATEGORY_ID = 3; // Women
 export const DEFAULT_EXCLUDE_CATEGORY_IDS = [113, 83, 84, 85]; // Last Call + Vault tree
 
 /** Honolulu observes no daylight saving time: HST is a fixed UTC-10. */
@@ -281,6 +293,135 @@ export function planCategorySync(members, currentIds) {
 }
 
 /**
+ * Ids of `rootId` and every descendant. `categories` is the FULL category list
+ * as category-tree records ({ category_id, parent_id }). Throws when the root
+ * isn't in the list, so a renumbered or deleted root fails loudly instead of
+ * silently emptying a subset category.
+ */
+export function subtreeIds(categories, rootId) {
+  const children = new Map();
+  let found = false;
+  for (const c of categories) {
+    const id = Number(c.category_id);
+    if (id === rootId) found = true;
+    const parent = Number(c.parent_id);
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent).push(id);
+  }
+  if (!found) throw new Error(`Category ${rootId} was not found in the category tree.`);
+  const ids = new Set([rootId]);
+  const queue = [rootId];
+  while (queue.length) {
+    for (const child of children.get(queue.shift()) || []) {
+      if (!ids.has(child)) {
+        ids.add(child);
+        queue.push(child);
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * The target-set members assigned to any category in `treeIds`, keeping the
+ * target set's order and renumbering positions from 1.
+ */
+export function subsetMembers(members, treeIds) {
+  return members
+    .filter((m) => (m.product.categories || []).some((c) => treeIds.has(Number(c))))
+    .map((m, i) => ({ ...m, position: i + 1 }));
+}
+
+/**
+ * Plan all three managed categories: the New Arrivals target set (114) and
+ * its men's / women's subsets (115 / 116).
+ *
+ * @param products   the product sweep
+ * @param categories the FULL category list (category-tree records)
+ * @param config     readNewArrivalsConfig(...)
+ * @param today      "YYYY-MM-DD"
+ * @returns {{ result, targets: Array<{ key, label, categoryId, rootId, members,
+ *            currentIds, plan, whyNot(id) }>, outsideTrees: members[] }}
+ *          targets in write order: 114, 115, 116. outsideTrees = target-set
+ *          members in neither root tree (a warning; membership is unaffected).
+ */
+export function planNewArrivals(products, categories, config, today) {
+  const result = computeNewArrivals(products, {
+    today,
+    windowDays: config.windowDays,
+    excludeCategoryIds: config.excludeCategoryIds,
+    minCount: config.minCount,
+  });
+  const inTarget = new Set(result.members.map((m) => m.id));
+  const managed = [config.categoryId, config.mensCategoryId, config.womensCategoryId];
+
+  const subset = (key, label, categoryId, rootId) => {
+    const tree = subtreeIds(categories, rootId);
+    const inside = managed.filter((id) => tree.has(id));
+    if (inside.length) {
+      throw new Error(
+        `Managed category ${inside.join(",")} sits inside root category ${rootId}'s tree; ` +
+          `its own assignments would feed its membership. Move it or change the root.`
+      );
+    }
+    return {
+      key,
+      label,
+      categoryId,
+      rootId,
+      tree,
+      members: subsetMembers(result.members, tree),
+      whyNot: (id) =>
+        inTarget.has(id)
+          ? `not in category ${rootId} or any of its subcategories`
+          : exclusionReason(result.evaluated.get(id), false, config.windowDays),
+    };
+  };
+
+  const targets = [
+    {
+      key: "new",
+      label: "New Arrivals",
+      categoryId: config.categoryId,
+      rootId: null,
+      members: result.members,
+      whyNot: (id) => exclusionReason(result.evaluated.get(id), inTarget.has(id), config.windowDays),
+    },
+    subset("mens", "New Men's Footwear", config.mensCategoryId, config.mensRootId),
+    subset("womens", "New Women's Footwear", config.womensCategoryId, config.womensRootId),
+  ].map((t) => {
+    const currentIds = products
+      .filter((p) => (p.categories || []).map(Number).includes(t.categoryId))
+      .map((p) => p.id);
+    return { ...t, currentIds, plan: planCategorySync(t.members, currentIds) };
+  });
+
+  // Warning only: target-set products in neither the Men nor the Women tree.
+  // They stay in 114 and are listed so their categories can be fixed in admin.
+  const inSubset = new Set(targets.slice(1).flatMap((t) => t.members.map((m) => m.id)));
+  const outsideTrees = result.members.filter((m) => !inSubset.has(m.id));
+
+  return { result, targets, outsideTrees };
+}
+
+/** Report rows for planNewArrivals(...).outsideTrees. */
+export function outsideTreesWarning(outsideTrees, config) {
+  return {
+    message:
+      `In the ${config.categoryId} target set but in neither the Men (${config.mensRootId}) nor the ` +
+      `Women (${config.womensRootId}) tree, so in neither ${config.mensCategoryId} nor ` +
+      `${config.womensCategoryId}. Warning only: fix their categories in BC admin.`,
+    count: outsideTrees.length,
+    products: outsideTrees.map((m) => ({
+      id: m.id,
+      name: m.product.name,
+      sku: m.product.sku,
+      categories: (m.product.categories || []).map(Number),
+    })),
+  };
+}
+
+/**
  * Resolve config from Worker env plus optional per-call overrides. Throws on
  * an invalid value so a typo in wrangler.toml fails loudly instead of syncing
  * the wrong category.
@@ -290,6 +431,26 @@ export function readNewArrivalsConfig(env = {}, { window_days } = {}) {
     env.NEW_ARRIVALS_CATEGORY_ID,
     DEFAULT_CATEGORY_ID,
     "NEW_ARRIVALS_CATEGORY_ID"
+  );
+  const mensCategoryId = parsePositiveInt(
+    env.NEW_ARRIVALS_MENS_CATEGORY_ID,
+    DEFAULT_MENS_CATEGORY_ID,
+    "NEW_ARRIVALS_MENS_CATEGORY_ID"
+  );
+  const womensCategoryId = parsePositiveInt(
+    env.NEW_ARRIVALS_WOMENS_CATEGORY_ID,
+    DEFAULT_WOMENS_CATEGORY_ID,
+    "NEW_ARRIVALS_WOMENS_CATEGORY_ID"
+  );
+  const mensRootId = parsePositiveInt(
+    env.MENS_ROOT_CATEGORY_ID,
+    DEFAULT_MENS_ROOT_CATEGORY_ID,
+    "MENS_ROOT_CATEGORY_ID"
+  );
+  const womensRootId = parsePositiveInt(
+    env.WOMENS_ROOT_CATEGORY_ID,
+    DEFAULT_WOMENS_ROOT_CATEGORY_ID,
+    "WOMENS_ROOT_CATEGORY_ID"
   );
   const windowDays =
     window_days !== undefined && window_days !== null
@@ -305,12 +466,29 @@ export function readNewArrivalsConfig(env = {}, { window_days } = {}) {
       .filter(Boolean)
       .map((s) => parsePositiveInt(s, null, "NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS"));
   }
-  if (excludeCategoryIds.includes(categoryId)) {
+  const managed = [categoryId, mensCategoryId, womensCategoryId];
+  for (const id of managed) {
+    if (excludeCategoryIds.includes(id)) {
+      throw new Error(`NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS includes managed New Arrivals category ${id}.`);
+    }
+  }
+  const all = [...managed, mensRootId, womensRootId];
+  if (new Set(all).size !== all.length) {
     throw new Error(
-      `NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS includes the New Arrivals category itself (${categoryId}).`
+      `New Arrivals category ids must all differ (category ${categoryId}, men's ${mensCategoryId}, ` +
+        `women's ${womensCategoryId}, men's root ${mensRootId}, women's root ${womensRootId}).`
     );
   }
-  return { categoryId, windowDays, excludeCategoryIds, minCount: DEFAULT_MIN_COUNT };
+  return {
+    categoryId,
+    mensCategoryId,
+    womensCategoryId,
+    mensRootId,
+    womensRootId,
+    windowDays,
+    excludeCategoryIds,
+    minCount: DEFAULT_MIN_COUNT,
+  };
 }
 
 function parsePositiveInt(value, fallback, label) {

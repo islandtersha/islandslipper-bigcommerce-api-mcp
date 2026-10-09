@@ -44,6 +44,10 @@ crons = ["0 15 * * *"]
 
 [vars]
 NEW_ARRIVALS_CATEGORY_ID = "114"                   # Featured > New (/featured/new)
+NEW_ARRIVALS_MENS_CATEGORY_ID = "115"              # Featured > New > New Men's Footwear
+NEW_ARRIVALS_WOMENS_CATEGORY_ID = "116"            # Featured > New > New Women's Footwear
+MENS_ROOT_CATEGORY_ID = "1"                        # Men: 115 = 114's set in this tree
+WOMENS_ROOT_CATEGORY_ID = "3"                      # Women: 116 = 114's set in this tree
 NEW_ARRIVALS_EXCLUDE_CATEGORY_IDS = "113,83,84,85" # Last Call + Vault tree
 NEW_ARRIVALS_WINDOW_DAYS = "60"
 NEW_ARRIVALS_LIVE = "true"

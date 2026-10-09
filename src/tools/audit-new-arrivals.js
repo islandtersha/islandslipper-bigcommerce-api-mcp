@@ -2,18 +2,19 @@
  * audit_new_arrivals — READ-ONLY report of what the New Arrivals sync would do.
  *
  * Reads every product in one paginated sweep (custom_fields + the few fields
- * the rules need) and the category records via the category-trees endpoint,
- * then applies the shared rules in src/lib/new-arrivals.js. Makes no writes.
+ * the rules need) and the full category list via the category-trees endpoint,
+ * then applies the shared rules in src/lib/new-arrivals.js to all three
+ * managed categories (114 and its men's / women's subsets 115 / 116). Makes no
+ * writes.
  *
- * Subrequests: ceil(products / 250) product pages + 2 category-tree reads
- * (the categories, then any parents not already fetched). 379 products = 4.
+ * Subrequests: ceil(products / 250) product pages + ceil(categories / 250)
+ * category-tree pages. 379 products and 120 categories = 3.
  */
 
 import { fetchAllPages } from "./catalog-helpers.js";
 import {
-  computeNewArrivals,
-  exclusionReason,
-  planCategorySync,
+  planNewArrivals,
+  outsideTreesWarning,
   readNewArrivalsConfig,
   todayHst,
   hstDateOf,
@@ -27,20 +28,14 @@ export const NEW_ARRIVALS_PRODUCT_SWEEP =
   "/v3/catalog/products?include=custom_fields" +
   "&include_fields=id,name,sku,is_visible,is_featured,date_created,categories";
 
-/** Audit-only companions: New Men's / New Women's Footwear. Never written. */
-const AUDIT_ONLY_CATEGORY_IDS = [115, 116];
-
 /** Read every product the New Arrivals rules need. */
 export async function loadNewArrivalsCatalog(bc, storeHash) {
   return fetchAllPages(bc, NEW_ARRIVALS_PRODUCT_SWEEP, storeHash);
 }
 
-/** Read category records (v3 category trees) for a list of ids. */
-async function fetchCategories(bc, ids, storeHash) {
-  if (ids.length === 0) return [];
-  const q = new URLSearchParams({ "category_id:in": ids.join(","), limit: "250" });
-  const data = await bc.get(`/v3/catalog/trees/categories?${q}`, { storeHash });
-  return data.data || [];
+/** Read every category record (v3 category trees: category_id, parent_id, …). */
+export async function loadCategoryTree(bc, storeHash) {
+  return fetchAllPages(bc, "/v3/catalog/trees/categories", storeHash);
 }
 
 const executeFunction = async ({ window_days, store_Hash } = {}, { bc, env }) => {
@@ -52,26 +47,15 @@ const executeFunction = async ({ window_days, store_Hash } = {}, { bc, env }) =>
     // 1. One product sweep — membership, dates, flags, and custom fields.
     const products = await loadNewArrivalsCatalog(bc, store_Hash);
 
-    // 2. Category records, then any parents we don't already have (for names).
-    const reportIds = [categoryId, ...AUDIT_ONLY_CATEGORY_IDS.filter((id) => id !== categoryId)];
-    const categories = await fetchCategories(bc, reportIds, store_Hash);
+    // 2. The full category list (names, parents, and the men's / women's subtrees).
+    const categories = await loadCategoryTree(bc, store_Hash);
     const byId = new Map(categories.map((c) => [c.category_id, c]));
-    const parentIds = [...new Set(categories.map((c) => c.parent_id))].filter(
-      (id) => id && !byId.has(id)
-    );
-    for (const c of await fetchCategories(bc, parentIds, store_Hash)) byId.set(c.category_id, c);
 
-    // 3. Apply the shared rules.
-    const result = computeNewArrivals(products, {
-      today,
-      windowDays: config.windowDays,
-      excludeCategoryIds: config.excludeCategoryIds,
-      minCount: config.minCount,
-    });
+    // 3. Apply the shared rules to 114, 115, 116.
+    const { result, targets, outsideTrees } = planNewArrivals(products, categories, config, today);
     const memberById = new Map(result.members.map((m) => [m.id, m]));
     const ev = (id) => result.evaluated.get(id);
-
-    const whyNot = (id) => exclusionReason(ev(id), memberById.has(id), config.windowDays);
+    const whyNot = (id) => targets[0].whyNot(id);
 
     const basic = (p) => ({ id: p.id, name: p.name, sku: p.sku });
     const datedRow = (p) => {
@@ -161,7 +145,8 @@ const executeFunction = async ({ window_days, store_Hash } = {}, { bc, env }) =>
     }
 
     // --- 7. Category details
-    const categoryDetails = reportIds.map((id) => {
+    const categoryDetails = targets.map((t) => {
+      const id = t.categoryId;
       const c = byId.get(id);
       if (!c) return { id, error: "category not found" };
       const parent = c.parent_id ? byId.get(c.parent_id) : null;
@@ -174,9 +159,12 @@ const executeFunction = async ({ window_days, store_Hash } = {}, { bc, env }) =>
         default_product_sort: c.default_product_sort,
         parent_id: c.parent_id,
         parent_name: parent ? parent.name : null,
-        role: id === categoryId ? "sync target" : "audit only (never written)",
+        role:
+          id === categoryId
+            ? "sync target"
+            : `sync subset: target-set products in category ${t.rootId} or its subcategories`,
       };
-      if (id === categoryId && c.default_product_sort !== "featured") {
+      if (c.default_product_sort !== "featured") {
         row.warning =
           `default_product_sort is "${c.default_product_sort}", not "featured" — the sync's sort ` +
           `order won't control display until this is set to Featured in BC admin.`;
@@ -184,35 +172,46 @@ const executeFunction = async ({ window_days, store_Hash } = {}, { bc, env }) =>
       return row;
     });
 
-    // --- 8. Current contents of the target + audit-only categories
+    // --- 8. Current contents of each managed category, judged against its own target
     const currentContents = {};
-    for (const id of reportIds) {
-      currentContents[id] = membersOf(id).map((p) => ({
+    for (const t of targets) {
+      const inThis = new Set(t.members.map((m) => m.id));
+      currentContents[t.categoryId] = membersOf(t.categoryId).map((p) => ({
         ...datedRow(p),
-        in_target_set: memberById.has(p.id),
-        verdict: memberById.has(p.id) ? "stay" : "remove",
-        why_not: whyNot(p.id),
+        in_target_set: inThis.has(p.id),
+        verdict: inThis.has(p.id) ? "stay" : "remove",
+        why_not: inThis.has(p.id) ? null : t.whyNot(p.id),
       }));
     }
 
-    // --- 9. Cleanup preview for the target category
-    const currentTargetIds = membersOf(categoryId).map((p) => p.id);
-    const plan = planCategorySync(result.members, currentTargetIds);
+    // --- 9. Cleanup preview for each managed category
     const byProductId = new Map(products.map((p) => [p.id, p]));
-    const cleanupPreview = {
-      category_id: categoryId,
-      add: plan.add.map((id) => ({ position: memberById.get(id).position, ...basic(byProductId.get(id)) })),
-      remove: plan.remove.map((id) => ({ ...basic(byProductId.get(id)), why: whyNot(id) })),
-      unchanged: plan.unchanged.map((id) => ({ position: memberById.get(id).position, ...basic(byProductId.get(id)) })),
-      sort_order: plan.sort_order,
-      note: `Removals are scoped to category ${categoryId} only; no product's other categories change.`,
-    };
+    const cleanupPreview = {};
+    for (const t of targets) {
+      const positionOf = new Map(t.members.map((m) => [m.id, m.position]));
+      const { plan } = t;
+      cleanupPreview[t.categoryId] = {
+        category_id: t.categoryId,
+        label: t.label,
+        root_category_id: t.rootId,
+        target_count: t.members.length,
+        add: plan.add.map((id) => ({ position: positionOf.get(id), ...basic(byProductId.get(id)) })),
+        remove: plan.remove.map((id) => ({ ...basic(byProductId.get(id)), why: t.whyNot(id) })),
+        unchanged: plan.unchanged.map((id) => ({ position: positionOf.get(id), ...basic(byProductId.get(id)) })),
+        sort_order: plan.sort_order,
+        note: `Removals are scoped to category ${t.categoryId} only; no product's other categories change.`,
+      };
+    }
 
     return {
       read_only: true,
       as_of_hst: today,
       config: {
         category_id: categoryId,
+        mens_category_id: config.mensCategoryId,
+        womens_category_id: config.womensCategoryId,
+        mens_root_category_id: config.mensRootId,
+        womens_root_category_id: config.womensRootId,
         window_days: config.windowDays,
         min_count: config.minCount,
         exclude_category_ids: config.excludeCategoryIds,
@@ -231,6 +230,7 @@ const executeFunction = async ({ window_days, store_Hash } = {}, { bc, env }) =>
       category_details: categoryDetails,
       current_contents: currentContents,
       cleanup_preview: cleanupPreview,
+      warnings: { outside_men_women_trees: outsideTreesWarning(outsideTrees, config) },
       subrequests_used: bc.subrequestCount,
     };
   } catch (error) {
@@ -246,7 +246,7 @@ const apiTool = {
     function: {
       name: "audit_new_arrivals",
       description:
-        "READ-ONLY audit of the New Arrivals category sync. Applies the shared date rule (effective launch date = valid ~launch_date custom field, else date_created as an HST date; new when 0 <= days < window, default 60; future dates excluded) and membership rule (visible, not in excluded categories; top up to 4 with the most recent eligible products; newest first, ties by id desc). Returns: would_be_new_arrivals (position, effective date, source, in_window|top_up); needs_launch_date (created inside the window with no valid ~launch_date); launch_date_issues (valid, malformed, and trimmed values); featured_flag (is_featured products); legacy_new_field (~new, plus ~new* lookalikes); category_details for the target (default 114) and 115/116 with a warning if the target's default sort isn't Featured; current_contents of those categories with stay/remove verdicts; cleanup_preview (exact add/remove/sort_order the first sync would produce); subrequests_used. Makes no writes.",
+        "READ-ONLY audit of the New Arrivals category sync. Applies the shared date rule (effective launch date = valid ~launch_date custom field, else date_created as an HST date; new when 0 <= days < window, default 60; future dates excluded) and membership rule (visible, not in excluded categories; top up to 4 with the most recent eligible products; newest first, ties by id desc). Returns: would_be_new_arrivals (position, effective date, source, in_window|top_up); needs_launch_date (created inside the window with no valid ~launch_date); launch_date_issues (valid, malformed, and trimmed values); featured_flag (is_featured products); legacy_new_field (~new, plus ~new* lookalikes); category_details for 114 and its men's / women's subsets 115 / 116, each with a warning if its default sort isn't Featured; current_contents of those categories with stay/remove verdicts against each category's own target; cleanup_preview keyed by category id (exact add/remove/sort_order the next sync would produce for 114, 115 and 116; 115 / 116 = target-set products in Men / Women (default roots 1 / 3) or any descendant, no top-up); warnings.outside_men_women_trees (114 target-set products in neither the Men nor the Women tree, with id, name, sku, current categories — warning only, membership unaffected); subrequests_used. Makes no writes.",
       parameters: {
         type: "object",
         properties: {
