@@ -5,6 +5,7 @@
  */
 
 import { apiTool as getAllProducts } from "./get-all-products.js";
+import { apiTool as getProductFeed } from "./get-product-feed.js";
 import { apiTool as getAllCustomers } from "./get-all-customers.js";
 import { apiTool as getAllOrders } from "./get-all-orders.js";
 import { apiTool as getDailySales } from "./get-daily-sales.js";
@@ -18,6 +19,7 @@ import { apiTool as setLaunchDate } from "./set-launch-date.js";
 
 export const tools = [
   getAllProducts,
+  getProductFeed,
   getAllCustomers,
   getAllOrders,
   getDailySales,
