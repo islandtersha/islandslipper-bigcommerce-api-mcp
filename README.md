@@ -24,12 +24,13 @@ is pasted once per client to approve it.
 
 | Tool | Purpose |
 | --- | --- |
-| `get_all_products` | List products (Catalog API v3). |
+| `get_all_products` | List products (Catalog API v3). No arguments = page 1 as before; optional `page`, `limit` (max 250), `fetch_all`, `include_fields`, `include`, `is_visible`. |
+| `get_product_feed` | Read-only compact row per visible product (full URL, images, price, stock, category names, plain-text description), all pages. `format: "csv"` gives a Pinterest catalog feed. Options: `include_hidden`, `include_out_of_stock`. |
 | `get_all_customers` | List/filter customers (Customers API v3). |
 | `get_all_orders` | List/filter orders (Orders API v2). |
 | `get_daily_sales` | Daily P&L for one HST day: order count, subtotal, shipping, tax, discounts, gross/refund/net revenue, AOV, and top-5 SKUs by units and by revenue. Excludes Incomplete/Cancelled/Declined/Refunded orders. Input: optional `date` (YYYY-MM-DD, defaults to yesterday in HST). |
 | `get_refunds_summary` | Refund activity over an HST date window: refund count/total, unique orders refunded, avg days from order to refund, breakdown by original-order month, and top-10 refunds. Input: `start_date` (required), optional `end_date` (defaults to today in HST). |
-| `get_inventory_levels` | Inventory for a list of `skus` (or a `product_id`), including variants. |
+| `get_inventory_levels` | Inventory for a list of `skus` (or a `product_id`), including variants. Large SKU lists are chunked 50 per request. |
 | `update_inventory` | Set `inventory_level` for a batch of SKUs. Defaults to `dry_run=true`. Respects BigCommerce rate limits. |
 | `get_categories` | Full category tree with breadcrumb paths; optional product counts and hidden-category pruning. |
 | `audit_new_arrivals` | Read-only report of what the New Arrivals sync would do. See [New Arrivals sync](#new-arrivals-sync). |
@@ -239,6 +240,19 @@ node scripts/add-ships-modifier.mjs --apply
 
 # Confirm: every in-scope product should now report skip_has_ships
 node scripts/add-ships-modifier.mjs
+```
+
+## Product feed check (`scripts/check-product-feed.mjs`)
+
+Read-only live check of `get_all_products` pagination, `get_product_feed`
+and `get_inventory_levels` with 400 SKUs. It calls the tools through the real
+MCP dispatcher using the credentials in `.dev.vars`, and prints the product
+totals, 3 sample feed rows, the CSV header, a CSV validity check and every
+product with no image or URL. The Pinterest CSV is saved to
+`reports/YYYYMMDD-N_pinterest-feed.csv`.
+
+```powershell
+node scripts/check-product-feed.mjs
 ```
 
 ## Install & deploy
